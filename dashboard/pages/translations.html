@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket 足球翻译</title>
+    <style id="theme-vars">
+:root {
+  --pm-primary-50: #eafffb;
+  --pm-primary-100: #c7fff4;
+  --pm-primary-200: #8fffe9;
+  --pm-primary-300: #4ffadd;
+  --pm-primary-400: #1ee8cc;
+  --pm-primary-500: #05c4ad;
+  --pm-primary-600: #009d8d;
+  --pm-primary-700: #007e73;
+  --pm-primary-800: #00635b;
+  --pm-primary-900: #00514b;
+  --pm-neutral-0: #ffffff;
+  --pm-neutral-50: #f7f8f8;
+  --pm-neutral-100: #eceeef;
+  --pm-neutral-200: #d5dadd;
+  --pm-neutral-300: #adb5ba;
+  --pm-neutral-400: #818b93;
+  --pm-neutral-500: #616b74;
+  --pm-neutral-600: #4a535b;
+  --pm-neutral-700: #3e454c;
+  --pm-neutral-800: #353a40;
+  --pm-neutral-900: #2d3136;
+  --pm-neutral-950: #0b0c0e;
+  --pm-background: #0b0c0e;
+  --pm-foreground: #f7f8f8;
+  --pm-card: #141619;
+  --pm-card-foreground: #f7f8f8;
+  --pm-popover: #1a1d21;
+  --pm-popover-foreground: #f7f8f8;
+  --pm-primary: #05c4ad;
+  --pm-primary-foreground: #0b0c0e;
+  --pm-muted: #1a1d21;
+  --pm-muted-foreground: #818b93;
+  --pm-border: #2d3136;
+  --pm-input: #1a1d21;
+  --pm-ring: #05c4ad;
+  --pm-state-success: #22c55e;
+  --pm-state-warning: #f59e0b;
+  --pm-state-error: #ef4444;
+  --pm-state-info: #3b82f6;
+  --pm-radius-xs: 2px;
+  --pm-radius-sm: 4px;
+  --pm-radius-md: 8px;
+  --pm-radius-lg: 16px;
+  --pm-radius-pill: 999px;
+  --pm-shadow-1: 0 1px 2px rgba(0,0,0,0.25), 0 1px 1px rgba(0,0,0,0.15);
+  --pm-shadow-2: 0 8px 24px -8px rgba(0,0,0,0.45);
+  --pm-font-sans: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --pm-font-mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, monospace;
+}
+.dark {
+  --pm-background: #0b0c0e;
+  --pm-foreground: #f7f8f8;
+  --pm-card: #141619;
+  --pm-card-foreground: #f7f8f8;
+  --pm-popover: #1a1d21;
+  --pm-popover-foreground: #f7f8f8;
+  --pm-primary: #05c4ad;
+  --pm-primary-foreground: #0b0c0e;
+  --pm-muted: #1a1d21;
+  --pm-muted-foreground: #818b93;
+  --pm-border: #2d3136;
+  --pm-input: #1a1d21;
+  --pm-ring: #05c4ad;
+}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--pm-background);
+    --color-foreground: var(--pm-foreground);
+    --color-card: var(--pm-card);
+    --color-card-foreground: var(--pm-card-foreground);
+    --color-popover: var(--pm-popover);
+    --color-popover-foreground: var(--pm-popover-foreground);
+    --color-primary: var(--pm-primary);
+    --color-primary-foreground: var(--pm-primary-foreground);
+    --color-muted: var(--pm-muted);
+    --color-muted-foreground: var(--pm-muted-foreground);
+    --color-border: var(--pm-border);
+    --color-input: var(--pm-input);
+    --color-ring: var(--pm-ring);
+    --radius-sm: var(--pm-radius-sm);
+    --radius-md: var(--pm-radius-md);
+    --radius-lg: var(--pm-radius-lg);
+  }
+  @layer base {
+    body { background: var(--pm-background); color: var(--pm-foreground); font-family: var(--pm-font-sans); }
+    td, th { @apply break-words; }
+    th { @apply whitespace-nowrap; }
+    .font-mono { font-family: var(--pm-font-mono); }
+    input, textarea { color-scheme: dark; }
+    pre, code { font-family: var(--pm-font-mono); }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--pm-background); }
+      .text-background { color: var(--pm-background); }
+      .border-background { border-color: var(--pm-background); }
+      .bg-foreground { background-color: var(--pm-foreground); }
+      .text-foreground { color: var(--pm-foreground); }
+      .border-foreground { border-color: var(--pm-foreground); }
+      .bg-card { background-color: var(--pm-card); }
+      .text-card { color: var(--pm-card); }
+      .border-card { border-color: var(--pm-card); }
+      .bg-card-foreground { background-color: var(--pm-card-foreground); }
+      .text-card-foreground { color: var(--pm-card-foreground); }
+      .border-card-foreground { border-color: var(--pm-card-foreground); }
+      .bg-popover { background-color: var(--pm-popover); }
+      .text-popover { color: var(--pm-popover); }
+      .border-popover { border-color: var(--pm-popover); }
+      .bg-popover-foreground { background-color: var(--pm-popover-foreground); }
+      .text-popover-foreground { color: var(--pm-popover-foreground); }
+      .border-popover-foreground { border-color: var(--pm-popover-foreground); }
+      .bg-primary { background-color: var(--pm-primary); }
+      .text-primary { color: var(--pm-primary); }
+      .border-primary { border-color: var(--pm-primary); }
+      .bg-primary-foreground { background-color: var(--pm-primary-foreground); }
+      .text-primary-foreground { color: var(--pm-primary-foreground); }
+      .border-primary-foreground { border-color: var(--pm-primary-foreground); }
+      .bg-muted { background-color: var(--pm-muted); }
+      .text-muted { color: var(--pm-muted); }
+      .border-muted { border-color: var(--pm-muted); }
+      .bg-muted-foreground { background-color: var(--pm-muted-foreground); }
+      .text-muted-foreground { color: var(--pm-muted-foreground); }
+      .border-muted-foreground { border-color: var(--pm-muted-foreground); }
+      .bg-border { background-color: var(--pm-border); }
+      .text-border { color: var(--pm-border); }
+      .border-border { border-color: var(--pm-border); }
+      .bg-input { background-color: var(--pm-input); }
+      .text-input { color: var(--pm-input); }
+      .border-input { border-color: var(--pm-input); }
+      .ring-input { --tw-ring-color: var(--pm-input); }
+    </style>
+    <style id="critical-layout">
+      html, body, #app-shell { height: 100%; overflow: hidden; }
+      body { margin: 0; }
+      #app-shell { display: flex; flex-direction: column; }
+      #translations-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+      .panel-scroll { overflow: auto; }
+      .row-hover:hover { background-color: rgba(255,255,255,0.03); }
+      .ai-step-line { position: absolute; left: 15px; top: 32px; bottom: -16px; width: 2px; background: var(--pm-border); }
+      .ai-step:last-child .ai-step-line { display: none; }
+    </style>
+</head>
+<body class="antialiased bg-background text-foreground">
+    <div id="app-shell" data-viewport-mode="app-shell">
+        <header data-region="header" class="shrink-0 border-b border-border bg-card">
+            <div class="flex items-center justify-between gap-4 px-4 py-3">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                        <i data-lucide="languages" class="h-5 w-5"></i>
+                    </div>
+                    <div class="min-w-0">
+                        <h1 class="text-base font-semibold leading-tight text-foreground truncate">比赛信息翻译</h1>
+                        <p class="text-xs text-muted-foreground truncate">导出、AI 翻译、批量导入足球赛事中文信息</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3 shrink-0">
+                    <a href="/" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                        <i data-lucide="layout-dashboard" class="h-3.5 w-3.5"></i>
+                        主控台
+                    </a>
+                    <a href="/soccer" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                        <i data-lucide="trophy" class="h-3.5 w-3.5"></i>
+                        赛事
+                    </a>
+                    <button id="btn-load" data-dom-id="btn-load" type="button" class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 transition-opacity">
+                        <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>
+                        重新加载
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <main id="translations-main" data-scroll-region="primary" class="overflow-y-auto p-4">
+            <div class="mx-auto max-w-7xl space-y-4">
+                <div class="grid gap-3 sm:grid-cols-3">
+                    <div class="rounded-lg border border-border bg-card p-3">
+                        <div class="flex items-center gap-3">
+                            <span class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary">
+                                <i data-lucide="database" class="h-4 w-4"></i>
+                            </span>
+                            <div>
+                                <p class="text-xs text-muted-foreground">数据库中的比赛</p>
+                                <p class="text-sm font-semibold"><span id="event-count">0</span> 条</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-border bg-card p-3">
+                        <div class="flex items-center gap-3">
+                            <span class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-[var(--pm-state-warning)]/10 text-[var(--pm-state-warning)]">
+                                <i data-lucide="file-text" class="h-4 w-4"></i>
+                            </span>
+                            <div>
+                                <p class="text-xs text-muted-foreground">待翻译比赛</p>
+                                <p class="text-sm font-semibold"><span id="untranslated-count">0</span> 条</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-lg border border-border bg-card p-3">
+                        <div class="flex items-center gap-3">
+                            <span class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-[var(--pm-state-success)]/10 text-[var(--pm-state-success)]">
+                                <i data-lucide="check-circle-2" class="h-4 w-4"></i>
+                            </span>
+                            <div>
+                                <p class="text-xs text-muted-foreground">已翻译比赛</p>
+                                <p class="text-sm font-semibold"><span id="translated-count">0</span> 条</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-lg border border-border bg-card p-4">
+                    <div class="mb-3 flex items-center gap-2">
+                        <i data-lucide="sparkles" class="h-4 w-4 text-primary"></i>
+                        <h2 class="text-sm font-semibold">AI 批量翻译工作流</h2>
+                    </div>
+                    <div class="relative space-y-4">
+                        <div class="ai-step relative pl-8">
+                            <div class="ai-step-line"></div>
+                            <div class="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">1</div>
+                            <div>
+                                <p class="text-sm font-medium">导出待翻译数据</p>
+                                <p class="text-xs text-muted-foreground mb-2">只导出比赛基础信息（不含盘口），减小 AI 输入量。</p>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <select id="export-scope" class="rounded-md border border-border bg-input px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary">
+                                        <option value="all">导出全部比赛</option>
+                                        <option value="untranslated">仅导出未翻译</option>
+                                    </select>
+                                    <button id="btn-export" type="button" class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 transition-opacity">
+                                        <i data-lucide="download" class="h-3.5 w-3.5"></i>
+                                        导出 JSON
+                                    </button>
+                                    <button id="btn-copy-export" type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                                        <i data-lucide="copy" class="h-3.5 w-3.5"></i>
+                                        复制到剪贴板
+                                    </button>
+                                    <span id="export-status" class="text-xs text-muted-foreground"></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="ai-step relative pl-8">
+                            <div class="ai-step-line"></div>
+                            <div class="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">2</div>
+                            <div>
+                                <p class="text-sm font-medium">获取格式模板</p>
+                                <p class="text-xs text-muted-foreground mb-2">将导出的 JSON 与下方格式模板一起发给 AI，要求 AI 返回固定格式的翻译结果。</p>
+                                <details class="group rounded-md border border-border bg-background">
+                                    <summary class="flex cursor-pointer items-center justify-between px-3 py-2 text-xs font-medium text-foreground">
+                                        <span class="inline-flex items-center gap-1.5"><i data-lucide="code" class="h-3.5 w-3.5"></i> 查看格式模板</span>
+                                        <i data-lucide="chevron-down" class="h-3.5 w-3.5 transition-transform group-open:rotate-180"></i>
+                                    </summary>
+                                    <div class="border-t border-border p-3">
+                                        <pre id="format-template" class="max-h-64 overflow-auto rounded bg-[#0b0c0e] p-2 text-[11px] leading-relaxed text-foreground/90"></pre>
+                                        <button id="btn-copy-template" type="button" class="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[10px] font-medium text-foreground hover:bg-muted transition-colors">
+                                            <i data-lucide="copy" class="h-3 w-3"></i> 复制模板
+                                        </button>
+                                    </div>
+                                </details>
+                            </div>
+                        </div>
+
+                        <div class="ai-step relative pl-8">
+                            <div class="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">3</div>
+                            <div>
+                                <p class="text-sm font-medium">粘贴翻译结果并导入</p>
+                                <p class="text-xs text-muted-foreground mb-2">将 AI 返回的固定格式 JSON 粘贴到下方，点击“批量导入”写入数据库。</p>
+                                <textarea id="import-json" rows="8" class="w-full rounded-md border border-border bg-input px-3 py-2 text-xs text-foreground outline-none focus:border-primary" placeholder='[{&quot;id&quot;:&quot;...&quot;,&quot;title_zh&quot;:&quot;...&quot;,&quot;home_team_zh&quot;:&quot;...&quot;,&quot;away_team_zh&quot;:&quot;...&quot;,&quot;league&quot;:&quot;...&quot;}]'></textarea>
+                                <div class="mt-2 flex flex-wrap items-center gap-2">
+                                    <button id="btn-import" type="button" class="inline-flex items-center gap-1.5 rounded-md bg-[var(--pm-state-success)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 active:opacity-80 transition-opacity">
+                                        <i data-lucide="upload" class="h-3.5 w-3.5"></i>
+                                        批量导入
+                                    </button>
+                                    <button id="btn-validate" type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                                        <i data-lucide="check-circle" class="h-3.5 w-3.5"></i>
+                                        校验格式
+                                    </button>
+                                    <span id="import-status" class="text-xs text-muted-foreground"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto rounded-lg border border-border bg-card">
+                    <div class="flex items-center justify-between px-3 py-2 border-b border-border">
+                        <h3 class="text-sm font-semibold">手动编辑</h3>
+                        <span class="text-xs text-muted-foreground">可直接修改单条比赛/盘口并保存</span>
+                    </div>
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-muted/50 text-muted-foreground">
+                            <tr>
+                                <th class="px-3 py-2">状态</th>
+                                <th class="px-3 py-2">英文标题</th>
+                                <th class="px-3 py-2 min-w-[160px]">中文标题</th>
+                                <th class="px-3 py-2">主队中文</th>
+                                <th class="px-3 py-2">客队中文</th>
+                                <th class="px-3 py-2">联赛</th>
+                                <th class="px-3 py-2">开赛时间</th>
+                                <th class="px-3 py-2">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="events-body" class="divide-y divide-border">
+                            <!-- rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        (function() {
+            lucide.createIcons();
+
+            const eventsBody = document.getElementById('events-body');
+            const eventCount = document.getElementById('event-count');
+            const untranslatedCount = document.getElementById('untranslated-count');
+            const translatedCount = document.getElementById('translated-count');
+            const btnExport = document.getElementById('btn-export');
+            const btnCopyExport = document.getElementById('btn-copy-export');
+            const exportStatus = document.getElementById('export-status');
+            const exportScope = document.getElementById('export-scope');
+            const formatTemplate = document.getElementById('format-template');
+            const btnCopyTemplate = document.getElementById('btn-copy-template');
+            const importJson = document.getElementById('import-json');
+            const btnImport = document.getElementById('btn-import');
+            const btnValidate = document.getElementById('btn-validate');
+            const importStatus = document.getElementById('import-status');
+
+            const FORMAT_TEMPLATE_OBJ = [{
+                id: "event-id-1",
+                title_zh: "中文赛事标题",
+                home_team_zh: "主队中文",
+                away_team_zh: "客队中文",
+                league: "联赛中文"
+            }];
+
+            let events = [];
+            let untranslatedEvents = [];
+            let allExportJson = '';
+            let untranslatedExportJson = '';
+
+            if (formatTemplate) {
+                formatTemplate.textContent = JSON.stringify(FORMAT_TEMPLATE_OBJ, null, 2);
+            }
+
+            function escapeHtml(str) {
+                return String(str ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            }
+
+            function formatTime(iso) {
+                if (!iso) return '--';
+                const d = new Date(iso.includes(' ') ? iso.replace(' ', 'T') + 'Z' : iso);
+                if (isNaN(d.getTime())) return iso;
+                return d.toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            }
+
+            function statusInfo(status) {
+                const map = {
+                    not_started: { label: '未开始', cls: 'bg-[var(--pm-state-warning)]/15 text-[var(--pm-state-warning)] border-[var(--pm-state-warning)]/30' },
+                    live: { label: '进行中', cls: 'bg-[var(--pm-state-success)]/15 text-[var(--pm-state-success)] border-[var(--pm-state-success)]/30' },
+                    ended: { label: '已结束', cls: 'bg-muted text-muted-foreground border-border' },
+                };
+                return map[status] || map.not_started;
+            }
+
+            function inputCls() {
+                return 'w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary';
+            }
+
+            function renderEvents() {
+                eventsBody.innerHTML = '';
+                if (!events.length) {
+                    eventsBody.innerHTML = `<tr><td colspan="8" class="px-3 py-6 text-center text-muted-foreground">暂无数据，请先在赛事页点击“刷新比赛”拉取数据</td></tr>`;
+                    eventCount.textContent = '0';
+                    return;
+                }
+                eventCount.textContent = String(events.length);
+
+                events.forEach((evt) => {
+                    const status = statusInfo(evt.match_status);
+                    const row = document.createElement('tr');
+                    row.className = 'row-hover border-b border-border';
+                    row.innerHTML = `
+                        <td class="px-3 py-2 align-top">
+                            <span class="inline-flex rounded border px-1.5 py-0.5 text-[10px] font-medium ${status.cls}">${status.label}</span>
+                        </td>
+                        <td class="px-3 py-2 align-top text-muted-foreground">${escapeHtml(evt.title_en)}</td>
+                        <td class="px-3 py-2 align-top"><input type="text" data-field="title_zh" value="${escapeHtml(evt.title_zh || '')}" class="${inputCls()}" /></td>
+                        <td class="px-3 py-2 align-top"><input type="text" data-field="home_team_zh" value="${escapeHtml(evt.home_team_zh || '')}" class="${inputCls()}" /></td>
+                        <td class="px-3 py-2 align-top"><input type="text" data-field="away_team_zh" value="${escapeHtml(evt.away_team_zh || '')}" class="${inputCls()}" /></td>
+                        <td class="px-3 py-2 align-top"><input type="text" data-field="league" value="${escapeHtml(evt.league || '')}" class="${inputCls()}" /></td>
+                        <td class="px-3 py-2 align-top whitespace-nowrap text-muted-foreground">${formatTime(evt.end_time)}</td>
+                        <td class="px-3 py-2 align-top">
+                            <div class="flex flex-col gap-1.5">
+                                <button type="button" class="save-event-btn inline-flex items-center justify-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90">
+                                    <i data-lucide="save" class="h-3 w-3"></i> 保存
+                                </button>
+                                <button type="button" class="edit-markets-btn inline-flex items-center justify-center gap-1 rounded border border-border bg-background px-2 py-1 text-[10px] font-medium text-foreground hover:bg-muted">
+                                    编辑盘口
+                                </button>
+                            </div>
+                        </td>
+                    `;
+                    eventsBody.appendChild(row);
+
+                    const saveBtn = row.querySelector('.save-event-btn');
+                    saveBtn.addEventListener('click', async () => {
+                        saveBtn.disabled = true;
+                        saveBtn.classList.add('opacity-60');
+                        const payload = { id: evt.id };
+                        row.querySelectorAll('input[data-field]').forEach((input) => {
+                            payload[input.dataset.field] = input.value.trim() || null;
+                        });
+                        try {
+                            const res = await fetch('/api/soccer/translations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                            const data = await res.json();
+                            alert(data.message || (data.success ? '保存成功' : '保存失败'));
+                        } catch (err) {
+                            alert('保存失败：' + err.message);
+                        } finally {
+                            saveBtn.disabled = false;
+                            saveBtn.classList.remove('opacity-60');
+                        }
+                    });
+
+                    const marketsRow = document.createElement('tr');
+                    marketsRow.className = 'hidden markets-row bg-background/50';
+                    marketsRow.innerHTML = `<td colspan="8" class="px-3 py-3"><div class="markets-container space-y-2"></div></td>`;
+                    eventsBody.appendChild(marketsRow);
+
+                    const editBtn = row.querySelector('.edit-markets-btn');
+                    const marketsContainer = marketsRow.querySelector('.markets-container');
+                    let marketsLoaded = false;
+                    editBtn.addEventListener('click', async () => {
+                        const isOpen = !marketsRow.classList.contains('hidden');
+                        document.querySelectorAll('.markets-row:not(.hidden)').forEach((r) => r.classList.add('hidden'));
+                        if (isOpen) return;
+                        marketsRow.classList.remove('hidden');
+                        if (marketsLoaded) return;
+                        marketsContainer.innerHTML = '<p class="text-xs text-muted-foreground">加载中...</p>';
+                        try {
+                            const res = await fetch(`/api/soccer/events/${evt.id}/markets`);
+                            const data = await res.json();
+                            renderMarkets(marketsContainer, data.markets || []);
+                            marketsLoaded = true;
+                        } catch (err) {
+                            marketsContainer.innerHTML = `<p class="text-xs text-[var(--pm-state-error)]">加载失败：${escapeHtml(err.message)}</p>`;
+                        }
+                    });
+                });
+                lucide.createIcons();
+            }
+
+            function renderMarkets(container, markets) {
+                container.innerHTML = '';
+                if (!markets.length) {
+                    container.innerHTML = '<p class="text-xs text-muted-foreground">暂无盘口</p>';
+                    return;
+                }
+                markets.forEach((market) => {
+                    const outcomes = Array.isArray(market.outcomes) ? market.outcomes : [];
+                    const div = document.createElement('div');
+                    div.className = 'rounded border border-border bg-card p-2';
+                    div.innerHTML = `
+                        <div class="mb-2 grid gap-2 sm:grid-cols-[1fr_1fr]">
+                            <div>
+                                <p class="text-[10px] text-muted-foreground">英文问题</p>
+                                <p class="text-xs text-foreground">${escapeHtml(market.question_en)}</p>
+                            </div>
+                            <div>
+                                <p class="text-[10px] text-muted-foreground">中文问题</p>
+                                <input type="text" data-field="question_zh" value="${escapeHtml(market.question_zh || '')}" class="${inputCls()}" />
+                            </div>
+                        </div>
+                        <div class="mb-2">
+                            <p class="text-[10px] text-muted-foreground">选项（用英文逗号分隔）</p>
+                            <input type="text" data-field="outcomes_zh" value="${escapeHtml(outcomes.join(','))}" class="${inputCls()}" />
+                        </div>
+                        <div class="flex justify-end">
+                            <button type="button" class="save-market-btn inline-flex items-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90">
+                                <i data-lucide="save" class="h-3 w-3"></i> 保存盘口
+                            </button>
+                        </div>
+                    `;
+                    container.appendChild(div);
+
+                    div.querySelector('.save-market-btn').addEventListener('click', async (e) => {
+                        const btn = e.currentTarget;
+                        btn.disabled = true;
+                        const question_zh = div.querySelector('[data-field="question_zh"]').value.trim() || null;
+                        const outcomesZhRaw = div.querySelector('[data-field="outcomes_zh"]').value.trim();
+                        const outcomes_zh = outcomesZhRaw ? outcomesZhRaw.split(',').map((s) => s.trim()).filter(Boolean) : null;
+                        try {
+                            const res = await fetch(`/api/soccer/markets/${market.id}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ question_zh, outcomes_zh }),
+                            });
+                            const data = await res.json();
+                            alert(data.message || (data.success ? '保存成功' : '保存失败'));
+                        } catch (err) {
+                            alert('保存失败：' + err.message);
+                        } finally {
+                            btn.disabled = false;
+                        }
+                    });
+                });
+                lucide.createIcons();
+            }
+
+            async function loadEvents() {
+                try {
+                    const [allRes, untranslatedRes] = await Promise.all([
+                        fetch('/api/soccer/translations'),
+                        fetch('/api/soccer/untranslated?limit=200'),
+                    ]);
+                    const allData = await allRes.json();
+                    const untranslatedData = await untranslatedRes.json();
+
+                    if (allData.success) {
+                        events = allData.events || [];
+                        renderEvents();
+                    } else {
+                        throw new Error(allData.error || '加载失败');
+                    }
+
+                    if (untranslatedData.success) {
+                        untranslatedEvents = untranslatedData.events || [];
+                        untranslatedCount.textContent = String(untranslatedEvents.length);
+                        translatedCount.textContent = String(Math.max(0, (allData.events || []).length - untranslatedEvents.length));
+                        allExportJson = JSON.stringify(buildExportPayload(events), null, 2);
+                        untranslatedExportJson = JSON.stringify(buildExportPayload(untranslatedEvents), null, 2);
+                    }
+                } catch (err) {
+                    eventsBody.innerHTML = `<tr><td colspan="8" class="px-3 py-6 text-center text-[var(--pm-state-error)]">加载失败：${escapeHtml(err.message)}</td></tr>`;
+                }
+            }
+
+            function buildExportPayload(sourceEvents) {
+                return sourceEvents.map((evt) => ({
+                    id: evt.id,
+                    title_en: evt.title_en,
+                    title_zh: evt.title_zh || '',
+                    home_team_en: evt.home_team_en || '',
+                    home_team_zh: evt.home_team_zh || '',
+                    away_team_en: evt.away_team_en || '',
+                    away_team_zh: evt.away_team_zh || '',
+                    league: evt.league || '',
+                    league_zh: evt.league || '',
+                    end_time: evt.end_time,
+                }));
+            }
+
+            function getCurrentExportJson() {
+                return exportScope.value === 'untranslated' ? untranslatedExportJson : allExportJson;
+            }
+
+            function downloadJson(filename, text) {
+                const blob = new Blob([text], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+
+            async function copyText(text, label) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                } catch (err) {
+                    console.warn('Clipboard failed', err);
+                    return false;
+                }
+            }
+
+            btnExport.addEventListener('click', async () => {
+                const json = getCurrentExportJson();
+                if (!json || json === '[]') {
+                    exportStatus.textContent = '当前范围没有可导出的数据';
+                    exportStatus.className = 'text-xs text-[var(--pm-state-warning)]';
+                    return;
+                }
+                const scopeLabel = exportScope.value === 'untranslated' ? 'untranslated' : 'all';
+                const filename = `soccer-${scopeLabel}-${new Date().toISOString().slice(0,10)}.json`;
+                downloadJson(filename, json);
+                exportStatus.textContent = '已导出 ' + filename;
+                exportStatus.className = 'text-xs text-[var(--pm-state-success)]';
+            });
+
+            btnCopyExport.addEventListener('click', async () => {
+                const json = getCurrentExportJson();
+                if (!json || json === '[]') {
+                    exportStatus.textContent = '当前范围没有可导出的数据';
+                    exportStatus.className = 'text-xs text-[var(--pm-state-warning)]';
+                    return;
+                }
+                const ok = await copyText(json, '导出 JSON');
+                exportStatus.textContent = ok ? '已复制到剪贴板' : '复制失败';
+                exportStatus.className = ok ? 'text-xs text-[var(--pm-state-success)]' : 'text-xs text-[var(--pm-state-error)]';
+            });
+
+            exportScope.addEventListener('change', () => {
+                const json = getCurrentExportJson();
+                exportStatus.textContent = json && json !== '[]' ? `当前可导出 ${JSON.parse(json).length} 条` : '当前范围没有数据';
+                exportStatus.className = 'text-xs text-muted-foreground';
+            });
+
+            btnCopyTemplate.addEventListener('click', async () => {
+                const text = JSON.stringify(FORMAT_TEMPLATE_OBJ, null, 2);
+                const ok = await copyText(text, '格式模板');
+                alert(ok ? '模板已复制' : '复制失败');
+            });
+
+            function validateImportPayload(raw) {
+                let parsed;
+                try {
+                    parsed = JSON.parse(raw);
+                } catch (err) {
+                    return { valid: false, error: 'JSON 解析失败：' + err.message };
+                }
+                if (!Array.isArray(parsed)) {
+                    return { valid: false, error: '顶层必须是数组' };
+                }
+                for (let i = 0; i < parsed.length; i++) {
+                    const item = parsed[i];
+                    if (!item || typeof item.id !== 'string' || !item.id) {
+                        return { valid: false, error: `第 ${i + 1} 条缺少有效 id` };
+                    }
+                    if (item.markets) {
+                        if (!Array.isArray(item.markets)) {
+                            return { valid: false, error: `第 ${i + 1} 条的 markets 必须是数组` };
+                        }
+                        for (let j = 0; j < item.markets.length; j++) {
+                            const m = item.markets[j];
+                            if (!m || typeof m.id !== 'string' || !m.id) {
+                                return { valid: false, error: `第 ${i + 1} 条第 ${j + 1} 个盘口缺少有效 id` };
+                            }
+                        }
+                    }
+                }
+                return { valid: true, parsed };
+            }
+
+            btnValidate.addEventListener('click', () => {
+                const raw = importJson.value.trim();
+                if (!raw) {
+                    importStatus.textContent = '请先粘贴 JSON';
+                    importStatus.className = 'text-xs text-[var(--pm-state-warning)]';
+                    return;
+                }
+                const result = validateImportPayload(raw);
+                if (result.valid) {
+                    importStatus.textContent = `格式正确，共 ${result.parsed.length} 条比赛`;
+                    importStatus.className = 'text-xs text-[var(--pm-state-success)]';
+                } else {
+                    importStatus.textContent = result.error;
+                    importStatus.className = 'text-xs text-[var(--pm-state-error)]';
+                }
+            });
+
+            btnImport.addEventListener('click', async () => {
+                const raw = importJson.value.trim();
+                if (!raw) {
+                    importStatus.textContent = '请先粘贴 JSON';
+                    importStatus.className = 'text-xs text-[var(--pm-state-warning)]';
+                    return;
+                }
+                const result = validateImportPayload(raw);
+                if (!result.valid) {
+                    importStatus.textContent = result.error;
+                    importStatus.className = 'text-xs text-[var(--pm-state-error)]';
+                    return;
+                }
+                btnImport.disabled = true;
+                btnImport.classList.add('opacity-60');
+                importStatus.textContent = '导入中...';
+                importStatus.className = 'text-xs text-muted-foreground';
+                try {
+                    const res = await fetch('/api/soccer/translations/import', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ events: result.parsed }),
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        importStatus.textContent = data.message || '导入成功';
+                        importStatus.className = 'text-xs text-[var(--pm-state-success)]';
+                        importJson.value = '';
+                        await loadEvents();
+                    } else {
+                        throw new Error(data.error || '导入失败');
+                    }
+                } catch (err) {
+                    importStatus.textContent = '导入失败：' + err.message;
+                    importStatus.className = 'text-xs text-[var(--pm-state-error)]';
+                } finally {
+                    btnImport.disabled = false;
+                    btnImport.classList.remove('opacity-60');
+                }
+            });
+
+            document.getElementById('btn-load').addEventListener('click', loadEvents);
+            loadEvents();
+        })();
+    </script>
+</body>
+</html>

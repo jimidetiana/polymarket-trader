@@ -1,0 +1,32 @@
+{
+  "name": "polymarket-trader",
+  "version": "0.1.0",
+  "description": "Automated Polymarket trading bot starter using direct REST/WebSocket APIs",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "frontend:build": "cd frontend && npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "soccer": "npm run frontend:build && tsx src/soccer/server.ts",
+    "soccer:fetch": "tsx src/soccer/fetcher.ts"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "https-proxy-agent": "^7.0.0",
+    "mysql2": "^3.23.3",
+    "viem": "^2.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

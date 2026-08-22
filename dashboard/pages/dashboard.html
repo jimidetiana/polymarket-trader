@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Trader Dashboard</title>
+    <style id="theme-vars">
+:root {
+  /* Primary accent: cyan-mint */
+  --pm-primary-50: #eafffb;
+  --pm-primary-100: #c7fff4;
+  --pm-primary-200: #8fffe9;
+  --pm-primary-300: #4ffadd;
+  --pm-primary-400: #1ee8cc;
+  --pm-primary-500: #05c4ad;
+  --pm-primary-600: #009d8d;
+  --pm-primary-700: #007e73;
+  --pm-primary-800: #00635b;
+  --pm-primary-900: #00514b;
+
+  /* Neutral slate */
+  --pm-neutral-0: #ffffff;
+  --pm-neutral-50: #f7f8f8;
+  --pm-neutral-100: #eceeef;
+  --pm-neutral-200: #d5dadd;
+  --pm-neutral-300: #adb5ba;
+  --pm-neutral-400: #818b93;
+  --pm-neutral-500: #616b74;
+  --pm-neutral-600: #4a535b;
+  --pm-neutral-700: #3e454c;
+  --pm-neutral-800: #353a40;
+  --pm-neutral-900: #2d3136;
+  --pm-neutral-950: #0b0c0e;
+
+  /* Semantic aliases */
+  --pm-background: #0b0c0e;
+  --pm-foreground: #f7f8f8;
+  --pm-card: #141619;
+  --pm-card-foreground: #f7f8f8;
+  --pm-popover: #1a1d21;
+  --pm-popover-foreground: #f7f8f8;
+  --pm-primary: #05c4ad;
+  --pm-primary-foreground: #0b0c0e;
+  --pm-muted: #1a1d21;
+  --pm-muted-foreground: #818b93;
+  --pm-border: #2d3136;
+  --pm-input: #1a1d21;
+  --pm-ring: #05c4ad;
+
+  /* State colors */
+  --pm-state-success: #22c55e;
+  --pm-state-warning: #f59e0b;
+  --pm-state-error: #ef4444;
+  --pm-state-info: #3b82f6;
+
+  /* Radius */
+  --pm-radius-xs: 2px;
+  --pm-radius-sm: 4px;
+  --pm-radius-md: 8px;
+  --pm-radius-lg: 16px;
+  --pm-radius-pill: 999px;
+
+  /* Shadows */
+  --pm-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 1px rgba(0, 0, 0, 0.15);
+  --pm-shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.45);
+
+  /* Typography */
+  --pm-font-sans: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --pm-font-mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, monospace;
+
+  /* Spacing scale */
+  --pm-s-1: 4px;
+  --pm-s-2: 8px;
+  --pm-s-3: 12px;
+  --pm-s-4: 16px;
+  --pm-s-5: 24px;
+  --pm-s-6: 32px;
+}
+
+.dark {
+  --pm-background: #0b0c0e;
+  --pm-foreground: #f7f8f8;
+  --pm-card: #141619;
+  --pm-card-foreground: #f7f8f8;
+  --pm-popover: #1a1d21;
+  --pm-popover-foreground: #f7f8f8;
+  --pm-primary: #05c4ad;
+  --pm-primary-foreground: #0b0c0e;
+  --pm-muted: #1a1d21;
+  --pm-muted-foreground: #818b93;
+  --pm-border: #2d3136;
+  --pm-input: #1a1d21;
+  --pm-ring: #05c4ad;
+}
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--pm-background);
+    --color-foreground: var(--pm-foreground);
+    --color-card: var(--pm-card);
+    --color-card-foreground: var(--pm-card-foreground);
+    --color-popover: var(--pm-popover);
+    --color-popover-foreground: var(--pm-popover-foreground);
+    --color-primary: var(--pm-primary);
+    --color-primary-foreground: var(--pm-primary-foreground);
+    --color-muted: var(--pm-muted);
+    --color-muted-foreground: var(--pm-muted-foreground);
+    --color-border: var(--pm-border);
+    --color-input: var(--pm-input);
+    --color-ring: var(--pm-ring);
+    --radius-sm: var(--pm-radius-sm);
+    --radius-md: var(--pm-radius-md);
+    --radius-lg: var(--pm-radius-lg);
+  }
+  @layer base {
+    body { background: var(--pm-background); color: var(--pm-foreground); font-family: var(--pm-font-sans); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+    .font-mono { font-family: var(--pm-font-mono); }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--pm-background); }
+      .text-background { color: var(--pm-background); }
+      .border-background { border-color: var(--pm-background); }
+      .ring-background { --tw-ring-color: var(--pm-background); }
+      .bg-foreground { background-color: var(--pm-foreground); }
+      .text-foreground { color: var(--pm-foreground); }
+      .border-foreground { border-color: var(--pm-foreground); }
+      .ring-foreground { --tw-ring-color: var(--pm-foreground); }
+      .bg-card { background-color: var(--pm-card); }
+      .text-card { color: var(--pm-card); }
+      .border-card { border-color: var(--pm-card); }
+      .ring-card { --tw-ring-color: var(--pm-card); }
+      .bg-card-foreground { background-color: var(--pm-card-foreground); }
+      .text-card-foreground { color: var(--pm-card-foreground); }
+      .border-card-foreground { border-color: var(--pm-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--pm-card-foreground); }
+      .bg-popover { background-color: var(--pm-popover); }
+      .text-popover { color: var(--pm-popover); }
+      .border-popover { border-color: var(--pm-popover); }
+      .ring-popover { --tw-ring-color: var(--pm-popover); }
+      .bg-popover-foreground { background-color: var(--pm-popover-foreground); }
+      .text-popover-foreground { color: var(--pm-popover-foreground); }
+      .border-popover-foreground { border-color: var(--pm-popover-foreground); }
+      .ring-popover-foreground { --tw-ring-color: var(--pm-popover-foreground); }
+      .bg-primary { background-color: var(--pm-primary); }
+      .text-primary { color: var(--pm-primary); }
+      .border-primary { border-color: var(--pm-primary); }
+      .ring-primary { --tw-ring-color: var(--pm-primary); }
+      .bg-primary-foreground { background-color: var(--pm-primary-foreground); }
+      .text-primary-foreground { color: var(--pm-primary-foreground); }
+      .border-primary-foreground { border-color: var(--pm-primary-foreground); }
+      .ring-primary-foreground { --tw-ring-color: var(--pm-primary-foreground); }
+      .bg-muted { background-color: var(--pm-muted); }
+      .text-muted { color: var(--pm-muted); }
+      .border-muted { border-color: var(--pm-muted); }
+      .ring-muted { --tw-ring-color: var(--pm-muted); }
+      .bg-muted-foreground { background-color: var(--pm-muted-foreground); }
+      .text-muted-foreground { color: var(--pm-muted-foreground); }
+      .border-muted-foreground { border-color: var(--pm-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--pm-muted-foreground); }
+      .bg-border { background-color: var(--pm-border); }
+      .text-border { color: var(--pm-border); }
+      .border-border { border-color: var(--pm-border); }
+      .ring-border { --tw-ring-color: var(--pm-border); }
+      .bg-input { background-color: var(--pm-input); }
+      .text-input { color: var(--pm-input); }
+      .border-input { border-color: var(--pm-input); }
+      .ring-input { --tw-ring-color: var(--pm-input); }
+      .bg-ring { background-color: var(--pm-ring); }
+      .text-ring { color: var(--pm-ring); }
+      .border-ring { border-color: var(--pm-ring); }
+      .ring-ring { --tw-ring-color: var(--pm-ring); }
+    </style>
+    <style id="critical-layout">
+      html, body, #app-shell { height: 100%; overflow: hidden; }
+      body { margin: 0; }
+      #app-shell { display: flex; flex-direction: column; }
+      #dashboard-main { flex: 1 1 auto; min-height: 0; overflow: auto; }
+      .panel-scroll { overflow: auto; }
+      @media (min-width: 1024px) {
+        #dashboard-grid { display: grid; grid-template-columns: 360px 1fr; gap: var(--pm-s-4); }
+      }
+      @media (max-width: 1023px) {
+        #dashboard-grid { display: flex; flex-direction: column; gap: var(--pm-s-4); }
+      }
+      .flash-up { animation: flashUp 350ms ease-out; }
+      .flash-down { animation: flashDown 350ms ease-out; }
+      @keyframes flashUp {
+        0% { background-color: rgba(5, 196, 173, 0.22); }
+        100% { background-color: transparent; }
+      }
+      @keyframes flashDown {
+        0% { background-color: rgba(239, 68, 68, 0.22); }
+        100% { background-color: transparent; }
+      }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body class="antialiased bg-background text-foreground">
+    <div id="app-shell" data-viewport-mode="app-shell">
+        <header data-region="header" class="shrink-0 border-b border-border bg-card">
+            <div class="flex items-center justify-between gap-4 px-4 py-3">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                        <i data-lucide="activity" class="h-5 w-5"></i>
+                    </div>
+                    <div class="min-w-0">
+                        <h1 class="text-base font-semibold leading-tight text-foreground truncate">Polymarket Trader Dashboard</h1>
+                        <p class="text-xs text-muted-foreground truncate">Will the US confirm that aliens exist before 2027?</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3 shrink-0">
+                    <div class="hidden sm:flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1.5">
+                        <span class="text-xs text-muted-foreground">市场</span>
+                        <span class="font-mono text-xs text-primary">0x7a3f...e9c2</span>
+                    </div>
+                    <span id="status-badge" class="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground">
+                        <span class="h-2 w-2 rounded-full bg-[var(--pm-state-success)]"></span>
+                        运行中
+                    </span>
+                    <a href="/soccer" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                        <i data-lucide="trophy" class="h-3.5 w-3.5"></i>
+                        足球赛事
+                    </a>
+                    <div class="flex items-center gap-2">
+                        <button id="btn-start" data-dom-id="btn-start" type="button" class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 transition-opacity">
+                            <i data-lucide="play" class="h-3.5 w-3.5"></i>
+                            启动策略
+                        </button>
+                        <button id="btn-stop" data-dom-id="btn-stop" type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                            <i data-lucide="square" class="h-3.5 w-3.5"></i>
+                            停止策略
+                        </button>
+                        <button id="btn-cancel-all" data-dom-id="btn-cancel-all" type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted transition-colors">
+                            <i data-lucide="x-circle" class="h-3.5 w-3.5"></i>
+                            全部撤单
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main id="dashboard-main" data-scroll-region="primary" class="overflow-y-auto p-4">
+            <div id="dashboard-grid">
+                <aside class="flex flex-col gap-4">
+                    <section data-region="params" class="rounded-lg border border-border bg-card shadow-[var(--pm-shadow-1)]">
+                        <div class="flex items-center gap-2 border-b border-border px-4 py-3">
+                            <i data-lucide="sliders-horizontal" class="h-4 w-4 text-primary"></i>
+                            <h2 class="text-sm font-semibold text-foreground">策略参数</h2>
+                        </div>
+                        <div class="space-y-3 p-4">
+                            <div>
+                                <label for="input-spread" class="block text-xs text-muted-foreground mb-1.5">价差 (%)</label>
+                                <div class="relative">
+                                    <input id="input-spread" type="number" value="0.35" step="0.01" class="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary font-mono" />
+                                    <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">%</span>
+                                </div>
+                            </div>
+                            <div>
+                                <label for="input-size" class="block text-xs text-muted-foreground mb-1.5">单笔数量</label>
+                                <input id="input-size" type="number" value="250" step="1" class="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary font-mono" />
+                            </div>
+                            <div>
+                                <label for="input-max-pos" class="block text-xs text-muted-foreground mb-1.5">最大仓位</label>
+                                <input id="input-max-pos" type="number" value="5000" step="100" class="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary font-mono" />
+                            </div>
+                        </div>
+                    </section>
+
+                    <section data-region="orderbook" class="flex-1 min-h-0 rounded-lg border border-border bg-card shadow-[var(--pm-shadow-1)] flex flex-col">
+                        <div class="flex items-center justify-between border-b border-border px-4 py-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="book-open" class="h-4 w-4 text-primary"></i>
+                                <h2 class="text-sm font-semibold text-foreground">订单簿</h2>
+                            </div>
+                            <span class="text-xs text-muted-foreground">USD / Share</span>
+                        </div>
+                        <div class="flex-1 min-h-0 overflow-hidden">
+                            <div class="grid grid-cols-2 border-b border-border text-xs text-muted-foreground">
+                                <div class="px-3 py-2 font-medium">买方</div>
+                                <div class="px-3 py-2 font-medium">卖方</div>
+                            </div>
+                            <div class="grid grid-cols-2 h-[calc(100%-33px)]">
+                                <div id="orderbook-bids" class="panel-scroll border-r border-border">
+                                    <table class="w-full text-xs">
+                                        <thead class="sticky top-0 bg-card text-muted-foreground">
+                                            <tr>
+                                                <th class="px-3 py-1.5 text-left font-medium">价格</th>
+                                                <th class="px-3 py-1.5 text-right font-medium">数量</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="font-mono">
+                                            <tr><td class="px-3 py-1 text-primary">0.465</td><td class="px-3 py-1 text-right text-foreground">1,240</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.463</td><td class="px-3 py-1 text-right text-foreground">3,880</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.461</td><td class="px-3 py-1 text-right text-foreground">2,150</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.459</td><td class="px-3 py-1 text-right text-foreground">5,020</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.457</td><td class="px-3 py-1 text-right text-foreground">1,875</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.455</td><td class="px-3 py-1 text-right text-foreground">4,320</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.453</td><td class="px-3 py-1 text-right text-foreground">2,640</td></tr>
+                                            <tr><td class="px-3 py-1 text-primary">0.451</td><td class="px-3 py-1 text-right text-foreground">3,110</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div id="orderbook-asks" class="panel-scroll">
+                                    <table class="w-full text-xs">
+                                        <thead class="sticky top-0 bg-card text-muted-foreground">
+                                            <tr>
+                                                <th class="px-3 py-1.5 text-left font-medium">价格</th>
+                                                <th class="px-3 py-1.5 text-right font-medium">数量</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="font-mono">
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.467</td><td class="px-3 py-1 text-right text-foreground">2,080</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.469</td><td class="px-3 py-1 text-right text-foreground">4,560</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.471</td><td class="px-3 py-1 text-right text-foreground">1,920</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.473</td><td class="px-3 py-1 text-right text-foreground">3,440</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.475</td><td class="px-3 py-1 text-right text-foreground">2,760</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.477</td><td class="px-3 py-1 text-right text-foreground">5,100</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.479</td><td class="px-3 py-1 text-right text-foreground">1,630</td></tr>
+                                            <tr><td class="px-3 py-1 text-[var(--pm-state-error)]">0.481</td><td class="px-3 py-1 text-right text-foreground">2,890</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </aside>
+
+                <div class="flex flex-col gap-4 min-w-0">
+                    <section data-region="orders" class="rounded-lg border border-border bg-card shadow-[var(--pm-shadow-1)]">
+                        <div class="flex items-center justify-between border-b border-border px-4 py-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="list" class="h-4 w-4 text-primary"></i>
+                                <h2 class="text-sm font-semibold text-foreground">当前订单</h2>
+                            </div>
+                            <span class="text-xs text-muted-foreground">3 个活跃订单</span>
+                        </div>
+                        <div class="panel-scroll max-h-[220px]">
+                            <table id="open-orders-table" class="w-full text-xs">
+                                <thead class="sticky top-0 bg-card text-muted-foreground border-b border-border">
+                                    <tr>
+                                        <th class="px-4 py-2 text-left font-medium">方向</th>
+                                        <th class="px-4 py-2 text-left font-medium">类型</th>
+                                        <th class="px-4 py-2 text-right font-medium">价格</th>
+                                        <th class="px-4 py-2 text-right font-medium">金额</th>
+                                        <th class="px-4 py-2 text-center font-medium">状态</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="font-mono">
+                                    <tr class="border-b border-border last:border-0">
+                                        <td class="px-4 py-2 text-primary">买</td>
+                                        <td class="px-4 py-2 text-foreground">限价</td>
+                                        <td class="px-4 py-2 text-right text-foreground">0.463</td>
+                                        <td class="px-4 py-2 text-right text-foreground">250</td>
+                                        <td class="px-4 py-2 text-center"><span class="inline-flex rounded-full bg-[rgba(34,197,94,0.12)] px-2 py-0.5 text-[var(--pm-state-success)]">挂单中</span></td>
+                                    </tr>
+                                    <tr class="border-b border-border last:border-0">
+                                        <td class="px-4 py-2 text-[var(--pm-state-error)]">卖</td>
+                                        <td class="px-4 py-2 text-foreground">限价</td>
+                                        <td class="px-4 py-2 text-right text-foreground">0.471</td>
+                                        <td class="px-4 py-2 text-right text-foreground">250</td>
+                                        <td class="px-4 py-2 text-center"><span class="inline-flex rounded-full bg-[rgba(34,197,94,0.12)] px-2 py-0.5 text-[var(--pm-state-success)]">挂单中</span></td>
+                                    </tr>
+                                    <tr class="border-b border-border last:border-0">
+                                        <td class="px-4 py-2 text-primary">买</td>
+                                        <td class="px-4 py-2 text-foreground">限价</td>
+                                        <td class="px-4 py-2 text-right text-foreground">0.459</td>
+                                        <td class="px-4 py-2 text-right text-foreground">500</td>
+                                        <td class="px-4 py-2 text-center"><span class="inline-flex rounded-full bg-[rgba(59,130,246,0.12)] px-2 py-0.5 text-[var(--pm-state-info)]">部分成交</span></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section data-region="positions" class="rounded-lg border border-border bg-card shadow-[var(--pm-shadow-1)]">
+                        <div class="flex items-center justify-between border-b border-border px-4 py-3">
+                            <div class="flex items-center gap-2">
+                                <i data-lucide="pie-chart" class="h-4 w-4 text-primary"></i>
+                                <h2 class="text-sm font-semibold text-foreground">持仓</h2>
+                            </div>
+                            <span class="text-xs text-muted-foreground">盈亏实时估算</span>
+                        </div>
+                        <div id="positions-panel" class="p-4">
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                <div class="rounded-md border border-border bg-background p-3">
+                                    <p class="text-xs text-muted-foreground mb-1">净仓位</p>
+                                    <p class="text-sm font-semibold font-mono text-foreground">+750</p>
+                                </div>
+                                <div class="rounded-md border border-border bg-background p-3">
+                                    <p class="text-xs text-muted-foreground mb-1">平均成本</p>
+                                    <p class="text-sm font-semibold font-mono text-foreground">0.461</p>
+                                </div>
+                                <div class="rounded-md border border-border bg-background p-3">
+                                    <p class="text-xs text-muted-foreground mb-1">当前价格</p>
+                                    <p class="text-sm font-semibold font-mono text-primary">0.467</p>
+                                </div>
+                                <div class="rounded-md border border-border bg-background p-3">
+                                    <p class="text-xs text-muted-foreground mb-1">盈亏</p>
+                                    <p class="text-sm font-semibold font-mono text-[var(--pm-state-success)]">+4.50 USDC</p>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section data-region="logs" class="flex-1 min-h-0 rounded-lg border border-border bg-card shadow-[var(--pm-shadow-1)] flex flex-col">
+                        <div class="flex items-center gap-2 border-b border-border px-4 py-3">
+                            <i data-lucide="terminal" class="h-4 w-4 text-primary"></i>
+                            <h2 class="text-sm font-semibold text-foreground">运行日志</h2>
+                        </div>
+                        <div class="flex-1 min-h-0 overflow-hidden">
+                            <ul id="log-list" class="panel-scroll h-full space-y-1 p-3 text-xs font-mono">
+                                <li class="flex gap-2 text-muted-foreground"><span class="shrink-0">09:42:01</span><span class="text-foreground">策略已启动，市场连接正常</span></li>
+                                <li class="flex gap-2 text-muted-foreground"><span class="shrink-0">09:42:03</span><span class="text-foreground">挂单：买入 250 @ 0.463</span></li>
+                                <li class="flex gap-2 text-muted-foreground"><span class="shrink-0">09:42:03</span><span class="text-foreground">挂单：卖出 250 @ 0.471</span></li>
+                                <li class="flex gap-2 text-muted-foreground"><span class="shrink-0">09:42:15</span><span class="text-primary">部分成交：买入 125 @ 0.463</span></li>
+                                <li class="flex gap-2 text-muted-foreground"><span class="shrink-0">09:43:08</span><span class="text-foreground">订单簿价差 0.80%，在目标范围内</span></li>
+                                <li class="flex gap-2 text-muted-foreground"><span class="shrink-0">09:43:22</span><span class="text-[var(--pm-state-warning)]">仓位接近上限 75%</span></li>
+                            </ul>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        (function() {
+            lucide.createIcons();
+
+            function flashCell(cell, direction) {
+                cell.classList.remove('flash-up', 'flash-down');
+                void cell.offsetWidth;
+                cell.classList.add(direction === 'up' ? 'flash-up' : 'flash-down');
+            }
+
+            function updateOrderBook() {
+                const sides = ['orderbook-bids', 'orderbook-asks'];
+                sides.forEach(function(id) {
+                    const container = document.getElementById(id);
+                    if (!container) return;
+                    const rows = container.querySelectorAll('tbody tr');
+                    if (!rows.length) return;
+                    const row = rows[Math.floor(Math.random() * rows.length)];
+                    const priceCell = row.cells[0];
+                    const sizeCell = row.cells[1];
+                    const currentPrice = parseFloat(priceCell.textContent);
+                    const delta = (Math.random() - 0.5) * 0.004;
+                    const newPrice = Math.max(0.01, Math.min(0.99, currentPrice + delta));
+                    priceCell.textContent = newPrice.toFixed(3);
+                    sizeCell.textContent = Math.floor(1000 + Math.random() * 5000).toLocaleString();
+                    flashCell(priceCell, delta >= 0 ? 'up' : 'down');
+                });
+            }
+
+            function addLog() {
+                const list = document.getElementById('log-list');
+                if (!list) return;
+                const messages = [
+                    '订单簿更新，最佳买价 0.463',
+                    '订单簿更新，最佳卖价 0.471',
+                    '价差监控：当前 0.80%',
+                    '持仓估值更新：+4.50 USDC',
+                    '心跳：API 连接正常'
+                ];
+                const now = new Date();
+                const time = now.toTimeString().split(' ')[0];
+                const msg = messages[Math.floor(Math.random() * messages.length)];
+                const li = document.createElement('li');
+                li.className = 'flex gap-2 text-muted-foreground';
+                li.innerHTML = '<span class="shrink-0">' + time + '</span><span class="text-foreground">' + msg + '</span>';
+                list.appendChild(li);
+                if (list.children.length > 50) list.removeChild(list.firstChild);
+                list.scrollTop = list.scrollHeight;
+            }
+
+            setInterval(updateOrderBook, 1800);
+            setInterval(addLog, 4200);
+        })();
+    </script>
+</body>
+</html>
