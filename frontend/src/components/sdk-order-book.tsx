@@ -1,5 +1,3 @@
-import { useEffect, useState } from 'react'
-import { fetchOrderBook } from '@/lib/api'
 import type { LivePrice, OrderBook } from '@/types'
 
 interface CompactOrderBookProps {
@@ -23,90 +21,51 @@ function formatQty(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
 
-function parseAsks(levels: { price: number; size: number }[]): BookLevel[] {
+function parseAsks(levels: { price: number | string; size?: number | string }[]): BookLevel[] {
   return levels
-    .map((l) => ({ price: Math.round(l.price * 100), quantity: l.size }))
+    .map((l) => ({ price: Math.round(Number(l.price) * 100), quantity: Number(l.size ?? 0) }))
     .filter((l) => l.price > 0)
     .sort((a, b) => a.price - b.price)
 }
 
-function parseBids(levels: { price: number; size: number }[]): BookLevel[] {
+function parseBids(levels: { price: number | string; size?: number | string }[]): BookLevel[] {
   return levels
-    .map((l) => ({ price: Math.round(l.price * 100), quantity: l.size }))
+    .map((l) => ({ price: Math.round(Number(l.price) * 100), quantity: Number(l.size ?? 0) }))
     .filter((l) => l.price > 0)
     .sort((a, b) => b.price - a.price)
 }
 
 export function SdkOrderBookAdapter({
-  tokenId,
-  livePrice,
-  initialPrice,
   wsOrderBook,
   onPriceClick,
 }: CompactOrderBookProps) {
-  const [restBook, setRestBook] = useState<{ bids: BookLevel[]; asks: BookLevel[] } | null>(null)
-  const [loading, setLoading] = useState(true)
+  const wsAsks = wsOrderBook?.asks ? parseAsks(wsOrderBook.asks) : []
+  const wsBids = wsOrderBook?.bids ? parseBids(wsOrderBook.bids) : []
 
-  const price = livePrice?.bid ?? livePrice?.ask ?? initialPrice
-
-  // One-time REST load: fills the gap before WebSocket snapshot arrives
-  useEffect(() => {
-    let mounted = true
-    fetchOrderBook(tokenId)
-      .then((book) => {
-        if (!mounted) return
-        setRestBook({ asks: parseAsks(book.asks || []), bids: parseBids(book.bids || []) })
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (mounted) setLoading(false)
-      })
-    return () => { mounted = false }
-  }, [tokenId])
-
-  // WebSocket data is primary; REST is fallback before WS snapshot
-  const wsAsks = wsOrderBook?.asks ? parseAsks(wsOrderBook.asks) : null
-  const wsBids = wsOrderBook?.bids ? parseBids(wsOrderBook.bids) : null
-  const asks = wsAsks ?? restBook?.asks ?? []
-  const bids = wsBids ?? restBook?.bids ?? []
-
-  // Fallback synthetic depth only before first real data
-  const fallbackAsks: BookLevel[] = [
-    { price: Math.round((price + 0.006) * 100), quantity: 900 },
-    { price: Math.round((price + 0.004) * 100), quantity: 1800 },
-    { price: Math.round((price + 0.002) * 100), quantity: 2400 },
-    { price: Math.round(price * 100), quantity: 1200 },
-  ]
-  const fallbackBids: BookLevel[] = [
-    { price: Math.round(price * 100), quantity: 1100 },
-    { price: Math.round(Math.max(0.01, price - 0.002) * 100), quantity: 2200 },
-    { price: Math.round(Math.max(0.01, price - 0.004) * 100), quantity: 1600 },
-    { price: Math.round(Math.max(0.01, price - 0.006) * 100), quantity: 800 },
-  ]
-
-  const displayAsks = asks.length ? asks : fallbackAsks
-  const displayBids = bids.length ? bids : fallbackBids
-
-  const maxAskQty = Math.max(...displayAsks.map((a) => a.quantity), 1)
-  const maxBidQty = Math.max(...displayBids.map((b) => b.quantity), 1)
-
-  const isLive = !!(wsAsks && wsBids)
+  const hasData = wsAsks.length > 0 || wsBids.length > 0
+  const maxAskQty = Math.max(...wsAsks.map((a) => a.quantity), 1)
+  const maxBidQty = Math.max(...wsBids.map((b) => b.quantity), 1)
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
         <h3 className="text-sm font-semibold text-foreground">盘口深度</h3>
         <span className="font-mono text-xs text-muted-foreground">
-          {loading && !asks.length ? '加载中...' : isLive ? 'WS 实时' : '连接中...'}
+          {hasData ? 'WS 实时' : '等待数据...'}
         </span>
       </div>
 
-      {onPriceClick && (
+      {onPriceClick && hasData && (
         <div className="border-b border-border bg-primary/5 px-4 py-1 text-center text-[10px] text-primary">
           点击价格快速下单
         </div>
       )}
 
+      {!hasData ? (
+        <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
+          等待 WebSocket 数据...
+        </div>
+      ) : (
       <div className="grid grid-cols-2 divide-x divide-border">
         {/* Asks: lowest ask at top, ascending */}
         <div className="flex flex-col">
@@ -119,7 +78,7 @@ export function SdkOrderBookAdapter({
             <span className="text-right">数量</span>
           </div>
           <div className="max-h-64 overflow-y-auto">
-            {displayAsks.map((ask, idx) => (
+            {wsAsks.map((ask, idx) => (
               <button
                 key={`ask-${idx}`}
                 type="button"
@@ -148,7 +107,7 @@ export function SdkOrderBookAdapter({
             <span className="text-right">数量</span>
           </div>
           <div className="max-h-64 overflow-y-auto">
-            {displayBids.map((bid, idx) => (
+            {wsBids.map((bid, idx) => (
               <button
                 key={`bid-${idx}`}
                 type="button"
@@ -166,6 +125,7 @@ export function SdkOrderBookAdapter({
           </div>
         </div>
       </div>
+      )}
     </div>
   )
 }

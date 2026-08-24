@@ -1,4 +1,4 @@
-import type { MarketType, SoccerMarket } from '@/types'
+import type { MarketType, SoccerMarket, SoccerEvent } from '@/types'
 
 const MARKET_TYPE_KEYWORDS: Array<[string[], MarketType]> = [
   [['halftime', 'half-time', 'half time'], 'halftime'],
@@ -49,7 +49,9 @@ export function classifyMarketType(questionEn: string | null | undefined): Marke
 }
 
 export function getMarketType(market: SoccerMarket): MarketType {
-  return (market.market_type as MarketType) || classifyMarketType(market.question_en)
+  const stored = market.market_type as MarketType
+  if (stored && stored !== 'other') return stored
+  return classifyMarketType(market.question_en)
 }
 
 export function groupMarketsByType(markets: SoccerMarket[]): Record<MarketType, SoccerMarket[]> {
@@ -99,4 +101,71 @@ export function getOutcomeRoundedClass(idx: number, total: number): string {
     return ''
   }
   return 'rounded-md'
+}
+
+const WILL_WIN_RE = /^will\s+(.+?)\s+win/i
+const DRAW_RE = /end in a draw|end in a tie/i
+
+export function mergeMoneylineMarkets(
+  markets: SoccerMarket[],
+  event: SoccerEvent | null,
+): SoccerMarket[] {
+  if (!event) return markets
+
+  const homeEn = (event.home_team_en || '').toLowerCase()
+  const awayEn = (event.away_team_en || '').toLowerCase()
+  if (!homeEn || !awayEn) return markets
+
+  const moneyline = markets.filter((m) => getMarketType(m) === 'moneyline')
+  const drawMarkets = markets.filter(
+    (m) => getMarketType(m) === 'moneyline' && DRAW_RE.test(m.question_en || ''),
+  )
+
+  let homeMarket: SoccerMarket | undefined
+  let awayMarket: SoccerMarket | undefined
+
+  for (const m of moneyline) {
+    if (DRAW_RE.test(m.question_en || '')) continue
+    const match = m.question_en?.match(WILL_WIN_RE)
+    if (!match) continue
+    const team = match[1].replace(/\s+on\s+.*$/, '').trim().toLowerCase()
+    if (!homeMarket && team.includes(homeEn)) homeMarket = m
+    else if (!awayMarket && team.includes(awayEn)) awayMarket = m
+  }
+
+  const drawMarket = drawMarkets[0]
+  if (!homeMarket || !awayMarket) return markets
+
+  const usedIds = new Set([homeMarket.id, awayMarket.id, drawMarket?.id].filter(Boolean) as string[])
+  const remaining = markets.filter((m) => !usedIds.has(m.id))
+
+  const homeName = event.home_team_zh || event.home_team_en || 'Home'
+  const awayName = event.away_team_zh || event.away_team_en || 'Away'
+
+  const merged: SoccerMarket = {
+    ...homeMarket,
+    id: `merged-ml-${homeMarket.id}`,
+    question_en: 'Match Winner',
+    question_zh: '主胜 / 平 / 客胜',
+    market_type: 'moneyline',
+    line: null,
+    outcomes: [homeName, '平局', awayName],
+    outcome_prices: [
+      homeMarket.outcome_prices?.[0] ?? 0,
+      drawMarket?.outcome_prices?.[0] ?? 0,
+      awayMarket.outcome_prices?.[0] ?? 0,
+    ],
+    clob_token_ids: [
+      homeMarket.clob_token_ids?.[0] ?? null,
+      drawMarket?.clob_token_ids?.[0] ?? null,
+      awayMarket.clob_token_ids?.[0] ?? null,
+    ],
+    source_market_ids: [
+      homeMarket.id,
+      drawMarket?.id ?? null,
+      awayMarket.id,
+    ],
+  }
+
+  return [merged, ...remaining]
 }

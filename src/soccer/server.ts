@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import axios from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { WebSocketServer, WebSocket } from 'ws';
 import { fetchTodaysSoccerEvents, fetchEventMarketsFromGamma } from './fetcher.js';
 import {
   getEventsWithMarkets,
@@ -576,6 +577,71 @@ const server = app.listen(PORT, async () => {
   // Refresh on startup, then schedule daily refresh at 00:05 UTC.
   await runAutoRefresh();
   scheduleDailyRefresh();
+});
+
+// WebSocket proxy: frontend → backend → Polymarket (through HTTP proxy)
+const WS_UPSTREAM = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url || '', `http://${request.headers.host}`);
+  if (url.pathname === '/ws/market') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+wss.on('connection', (clientWs: WebSocket) => {
+  const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+  console.log('[WS Proxy] client connected, connecting upstream with proxy:', !!agent);
+  const upstream = new WebSocket(WS_UPSTREAM, { agent } as any);
+
+  // Buffer client messages until upstream is open
+  const msgBuffer: string[] = [];
+  let upstreamReady = false;
+
+  // Register listener immediately - don't wait for upstream open
+  clientWs.on('message', (data) => {
+    const msg = data.toString();
+    if (upstreamReady && upstream.readyState === WebSocket.OPEN) {
+      upstream.send(msg);
+    } else {
+      msgBuffer.push(msg);
+    }
+  });
+
+  upstream.on('open', () => {
+    console.log('[WS Proxy] upstream connected, flushing', msgBuffer.length, 'buffered msgs');
+    upstreamReady = true;
+    for (const msg of msgBuffer) {
+      upstream.send(msg);
+    }
+    msgBuffer.length = 0;
+  });
+
+  upstream.on('message', (data) => {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(data.toString());
+    }
+  });
+
+  upstream.on('error', (err: Error) => {
+    console.error('[WS Proxy] upstream error:', err.message);
+  });
+
+  upstream.on('close', (code?: number, reason?: Buffer) => {
+    console.log('[WS Proxy] upstream closed:', code, reason?.toString());
+    if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+  });
+
+  clientWs.on('close', () => {
+    if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
+      upstream.close();
+    }
+  });
 });
 
 process.on('SIGINT', async () => {

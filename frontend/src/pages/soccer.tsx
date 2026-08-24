@@ -16,11 +16,12 @@ import {
 } from '@/lib/api'
 import { useSoccerWs } from '@/lib/useSoccerWs'
 import {
-  MARKET_TYPE_ORDER,
-  MARKET_TYPE_LABELS,
-  groupMarketsByType,
-  getOutcomeColor,
-  getOutcomeRoundedClass,
+ MARKET_TYPE_ORDER,
+ MARKET_TYPE_LABELS,
+ groupMarketsByType,
+ mergeMoneylineMarkets,
+ getOutcomeColor,
+ getOutcomeRoundedClass,
 } from '@/lib/markets'
 import type { SoccerEvent, SoccerMarket, SelectedOutcome } from '@/types'
 
@@ -195,18 +196,19 @@ export default function SoccerPage() {
   ) {
     const outcomes = Array.isArray(market.outcomes) ? market.outcomes : []
     const tokens = Array.isArray(market.clob_token_ids) ? market.clob_token_ids : []
-    const pricesArr = Array.isArray(market.outcome_prices) ? market.outcome_prices : []
     const tokenId = tokens[outcomeIdx]
     const outcomeName = outcomes[outcomeIdx]
     if (!tokenId || !outcomeName) return
 
     const live = tokenId ? prices[tokenId] : undefined
-    const initial = Number(pricesArr[outcomeIdx] || 0)
-    const price = live?.bid ?? live?.ask ?? initial
+    const price = live?.bid ?? live?.ask ?? 0
+
+    const sourceIds = (market as SoccerMarket & { source_market_ids?: string[] }).source_market_ids
+    const marketId = sourceIds?.[outcomeIdx] ?? market.id
 
     setSelected({
       eventId: event.id,
-      marketId: market.id,
+      marketId,
       tokenId,
       outcomeName,
       price,
@@ -740,7 +742,8 @@ function MarketGroups({
   onToggleCollapse: (type: string) => void
   onSelectOutcome: (event: SoccerEvent, market: SoccerMarket, idx: number) => void
 }) {
-  const grouped = useMemo(() => groupMarketsByType(markets), [markets])
+  const mergedMarkets = useMemo(() => mergeMoneylineMarkets(markets, selectedEvent), [markets, selectedEvent])
+  const grouped = useMemo(() => groupMarketsByType(mergedMarkets), [mergedMarkets])
   const favoriteMarkets = useMemo(
     () => markets.filter((m) => favoriteIds.has(m.id)),
     [markets, favoriteIds],
@@ -830,7 +833,6 @@ function MarketCard({
   onToggleFavorite: () => void
 }) {
   const outcomes = Array.isArray(market.outcomes) ? market.outcomes : []
-  const prices = Array.isArray(market.outcome_prices) ? market.outcome_prices : []
   const tokens = Array.isArray(market.clob_token_ids) ? market.clob_token_ids : []
 
   const gridClass =
@@ -878,9 +880,8 @@ function MarketCard({
       <div className={cn('mt-auto grid gap-2', gridClass)}>
         {outcomes.map((name, idx) => {
           const tokenId = tokens[idx]
-          const initialPrice = Number(prices[idx] ?? 0)
           const live = tokenId ? livePrices[tokenId] : undefined
-          const price = live?.bid ?? live?.ask ?? initialPrice
+          const price = live?.bid ?? live?.ask ?? null
           const accentColor = getOutcomeColor(name, idx, outcomes.length)
           const roundedClass = getOutcomeRoundedClass(idx, outcomes.length)
           const isSelected = selected?.tokenId === tokenId
@@ -902,7 +903,7 @@ function MarketCard({
                 className="font-mono text-base font-bold"
                 style={{ color: accentColor }}
               >
-                {formatPercent(price)}
+                {price !== null ? formatPercent(price) : '—'}
               </span>
             </button>
           )

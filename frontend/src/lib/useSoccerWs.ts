@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { LivePrice, OrderBook, WsMessage, WsStatus } from '@/types'
+import type { LivePrice, OrderBook, WsStatus } from '@/types'
 
-const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market'
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/market`
 
 function parseBookSide(
   side?: Array<{ price: number | string; size?: number | string }>,
+  sortOrder?: 'asc' | 'desc',
 ): Array<{ price: number; size: number }> {
   if (!Array.isArray(side)) return []
-  return side
+  const result = side
     .map((level) => ({
       price: Number(level.price),
       size: Number(level.size ?? 0),
     }))
     .filter((level) => !isNaN(level.price) && level.price > 0)
+  if (sortOrder === 'asc') result.sort((a, b) => a.price - b.price)
+  else if (sortOrder === 'desc') result.sort((a, b) => b.price - a.price)
+  return result
 }
 
 export function useSoccerWs(tokenIds: string[]) {
@@ -64,9 +68,16 @@ export function useSoccerWs(tokenIds: string[]) {
     ws.onmessage = (event) => {
       if (event.data === 'PONG') return
       try {
-        const msg: WsMessage = JSON.parse(event.data)
-        handleWsMessage(msg)
-      } catch (err) {
+        const data = JSON.parse(event.data)
+        // Polymarket market channel sends arrays of book objects
+        if (Array.isArray(data)) {
+          for (const item of data) {
+            handleWsMessage(item)
+          }
+        } else {
+          handleWsMessage(data)
+        }
+      } catch {
         // ignore malformed messages
       }
     }
@@ -86,12 +97,22 @@ export function useSoccerWs(tokenIds: string[]) {
       }
     }
 
-    function handleWsMessage(msg: WsMessage) {
+    function handleWsMessage(msg: any) {
       const priceUpdates: Record<string, LivePrice> = {}
       const bookUpdates: Record<string, OrderBook> = {}
-      if (msg.event_type === 'book' && msg.asset_id) {
-        const bids = parseBookSide(msg.bids)
-        const asks = parseBookSide(msg.asks)
+
+      // Market channel: book snapshot without event_type
+      if (msg.asset_id && (msg.bids || msg.asks) && !msg.event_type) {
+        const bids = parseBookSide(msg.bids, 'desc')
+        const asks = parseBookSide(msg.asks, 'asc')
+        priceUpdates[msg.asset_id] = {
+          bid: bids[0]?.price ?? null,
+          ask: asks[0]?.price ?? null,
+        }
+        bookUpdates[msg.asset_id] = { bids, asks }
+      } else if (msg.event_type === 'book' && msg.asset_id) {
+        const bids = parseBookSide(msg.bids, 'desc')
+        const asks = parseBookSide(msg.asks, 'asc')
         priceUpdates[msg.asset_id] = {
           bid: bids[0]?.price ?? null,
           ask: asks[0]?.price ?? null,
@@ -108,6 +129,7 @@ export function useSoccerWs(tokenIds: string[]) {
         const ask = msg.best_ask !== undefined ? Number(msg.best_ask) : null
         priceUpdates[msg.asset_id] = { bid, ask }
       }
+
       if (Object.keys(priceUpdates).length) {
         setPrices((prev) => ({ ...prev, ...priceUpdates }))
       }

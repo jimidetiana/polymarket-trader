@@ -133,7 +133,7 @@ const MARKET_TYPE_KEYWORDS: Array<[string[], string]> = [
   [['total goals', 'over/under', 'o/u'], 'total'],
   [['spread', 'handicap', 'asian handicap'], 'spread'],
   [['both teams to score', 'btts'], 'btts'],
-  [['moneyline', 'winner', 'win the match', 'who will win'], 'moneyline'],
+  [['moneyline', 'winner', 'win the match', 'who will win', 'end in a draw', 'end in a tie'], 'moneyline'],
 ];
 
 function classifyMarketType(questionEn: string): string {
