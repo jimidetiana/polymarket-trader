@@ -60,6 +60,25 @@ const clobClient = axios.create({
   ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl) } : {}),
 });
 
+async function clobGet(path: string, params?: Record<string, string>): Promise<any> {
+  const MAX_RETRIES = 3;
+  let lastErr: any;
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    try {
+      const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl, { keepAlive: false }) : undefined;
+      const response = await axios.get(`${CLOB_BASE}${path}`, {
+        params,
+        timeout: 10000,
+        ...(agent ? { httpsAgent: agent } : {}),
+      });
+      return response.data;
+    } catch (err: any) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
@@ -332,8 +351,8 @@ app.get('/api/soccer/events/:id/markets', asyncHandler(async (req, res) => {
 app.get('/api/soccer/orderbook/:tokenId', asyncHandler(async (req, res) => {
   const tokenId = req.params.tokenId;
   try {
-    const response = await clobClient.get('/book', { params: { token_id: tokenId } });
-    res.json({ success: true, book: response.data });
+    const book = await clobGet('/book', { token_id: tokenId });
+    res.json({ success: true, book });
   } catch (err: any) {
     const status = err.response?.status || 500;
     const message = err.response?.data?.error || err.message || '获取盘口深度失败';

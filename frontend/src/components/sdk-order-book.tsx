@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { fetchOrderBook } from '@/lib/api'
-import { cn } from '@/lib/utils'
 import type { LivePrice } from '@/types'
 
 interface CompactOrderBookProps {
@@ -10,8 +9,7 @@ interface CompactOrderBookProps {
   onPriceClick?: (priceCents: number, side: 'BUY' | 'SELL') => void
 }
 
-const POLL_INTERVAL_MS = 5000
-const MAX_ERROR_BEFORE_DISPLAY = 3
+const POLL_INTERVAL_MS = 3000
 
 interface BookLevel {
   price: number
@@ -42,7 +40,6 @@ export function SdkOrderBookAdapter({
   useEffect(() => {
     let mounted = true
     let timer: ReturnType<typeof setInterval> | null = null
-    let errorCount = 0
 
     async function load() {
       try {
@@ -65,13 +62,9 @@ export function SdkOrderBookAdapter({
         setAsks(parsedAsks)
         setBids(parsedBids)
         setError(null)
-        errorCount = 0
-      } catch {
+      } catch (err) {
         if (!mounted) return
-        errorCount++
-        if (errorCount >= MAX_ERROR_BEFORE_DISPLAY) {
-          setError('连接不稳定，显示上次数据')
-        }
+        setError(err instanceof Error ? err.message : '加载失败')
       } finally {
         if (mounted) setLoading(false)
       }
@@ -110,8 +103,8 @@ export function SdkOrderBookAdapter({
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
         <h3 className="text-sm font-semibold text-foreground">盘口深度</h3>
-        <span className={cn('font-mono text-xs', error ? 'text-warning' : 'text-muted-foreground')}>
-          {loading && !asks.length ? '加载中...' : error ? error : '实时'}
+        <span className="font-mono text-xs text-muted-foreground">
+          {loading && !asks.length ? '加载中...' : error ? `错误: ${error}` : '实时'}
         </span>
       </div>
 
