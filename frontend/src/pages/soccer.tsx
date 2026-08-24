@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp, Wallet, ListOrdered, XCircle, Languages } from 'lucide-react'
+import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp, Wallet, ListOrdered, XCircle } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { SdkOrderBookAdapter } from '@/components/sdk-order-book'
 import { OrderForm } from '@/components/order-form'
@@ -25,7 +25,6 @@ import {
 import type { SoccerEvent, SoccerMarket, SelectedOutcome } from '@/types'
 
 type FilterKey = 'focus' | 'live' | 'not_started' | 'ended' | 'all'
-type Lang = 'zh' | 'en'
 
 const FILTER_TABS: { key: FilterKey; label: (counts: Record<string, number>) => string }[] = [
   { key: 'focus', label: () => '重点' },
@@ -34,11 +33,6 @@ const FILTER_TABS: { key: FilterKey; label: (counts: Record<string, number>) => 
   { key: 'ended', label: (c) => `已结束 (${c.ended})` },
   { key: 'all', label: (c) => `全部 (${c.all})` },
 ]
-
-function pickName(zh: string | null | undefined, en: string | null | undefined, lang: Lang): string {
-  if (lang === 'zh') return zh || en || '-'
-  return en || zh || '-'
-}
 
 export default function SoccerPage() {
   const [events, setEvents] = useState<SoccerEvent[]>([])
@@ -57,11 +51,6 @@ export default function SoccerPage() {
   const [orders, setOrders] = useState<any[]>([])
   const [showOrders, setShowOrders] = useState(false)
   const [orderBookClick, setOrderBookClick] = useState<{ priceCents: number; side: 'BUY' | 'SELL'; timestamp: number } | null>(null)
-  const [lang, setLang] = useState<Lang>(() => (localStorage.getItem('pm-lang') as Lang) || 'zh')
-
-  useEffect(() => {
-    localStorage.setItem('pm-lang', lang)
-  }, [lang])
 
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(() => {
     try {
@@ -287,26 +276,16 @@ export default function SoccerPage() {
       title="Polymarket 足球赛事"
       subtitle="左侧选择比赛，右侧查看盘口并下单"
       actions={
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
-          >
-            <Languages className="h-3.5 w-3.5" />
-            {lang === 'zh' ? '中文' : 'EN'}
-          </button>
-          <button
-            type="button"
-            data-dom-id="btn-refresh"
-            disabled={loading}
-            onClick={handleRefresh}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-60"
-          >
-            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-            刷新比赛
-          </button>
-        </div>
+        <button
+          type="button"
+          data-dom-id="btn-refresh"
+          disabled={loading}
+          onClick={handleRefresh}
+          className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-60"
+        >
+          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+          刷新比赛
+        </button>
       }
     >
       <div className="flex h-[calc(100vh-8rem)] gap-4 overflow-hidden">
@@ -357,7 +336,6 @@ export default function SoccerPage() {
                     key={evt.id}
                     event={evt}
                     active={selectedEvent?.id === evt.id}
-                    lang={lang}
                     onClick={() => handleSelectEvent(evt)}
                   />
                 ))
@@ -379,8 +357,13 @@ export default function SoccerPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <h2 className="truncate text-base font-semibold text-foreground">
-                      {pickName(selectedEvent.title_zh, selectedEvent.title_en, lang)}
+                      {selectedEvent.title_zh || selectedEvent.title_en}
                     </h2>
+                    {selectedEvent.title_en && selectedEvent.title_zh && (
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {selectedEvent.title_en}
+                      </p>
+                    )}
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       {selectedEvent.league || '足球'} · {formatTime(selectedEvent.end_time)} ·{' '}
                       <StatusBadge status={selectedEvent.match_status || 'not_started'} />
@@ -416,7 +399,6 @@ export default function SoccerPage() {
                     favoriteIds={favoriteIds}
                     collapsedTypes={collapsedTypes}
                     selectedEvent={selectedEvent}
-                    lang={lang}
                     onToggleFavorite={toggleFavorite}
                     onToggleCollapse={(type) =>
                       setCollapsedTypes((prev) => {
@@ -451,8 +433,13 @@ export default function SoccerPage() {
                     下单 · {selected.outcomeName}
                   </p>
                   <p className="truncate text-[10px] text-muted-foreground">
-                    {pickName(selected.event.title_zh, selected.event.title_en, lang)}
+                    {selected.event.title_zh || selected.event.title_en}
                   </p>
+                  {selected.event.title_en && selected.event.title_zh && (
+                    <p className="truncate text-[10px] text-muted-foreground">
+                      {selected.event.title_en}
+                    </p>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -467,7 +454,7 @@ export default function SoccerPage() {
                 <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 p-3">
                   <p className="text-[10px] text-muted-foreground">已选盘口</p>
                   <p className="text-sm font-medium text-foreground">
-                    {pickName(selected.market.question_zh, selected.market.question_en, lang)}
+                    {selected.market.question_zh || selected.market.question_en}
                   </p>
                   <p className="mt-1 font-mono text-2xl font-bold text-primary">
                     {formatPercent(selected.price)}
@@ -495,7 +482,7 @@ export default function SoccerPage() {
                 <div className="mt-4 rounded-xl border border-border bg-card p-4">
                   <OrderForm
                     outcomeName={selected.outcomeName}
-                    marketQuestion={pickName(selected.market.question_zh, selected.market.question_en, lang)}
+                    marketQuestion={selected.market.question_zh || selected.market.question_en || ''}
                     currentPrice={selected.price}
                     maxAmount={wallet ? wallet.balance_usdc : 10000}
                     externalPrice={orderBookClick}
@@ -571,7 +558,7 @@ export default function SoccerPage() {
                               <OrderStatusBadge status={order.order_status} />
                             </div>
                             <p className="mt-1 truncate text-[10px] text-muted-foreground">
-                              {pickName(order.title_zh || order.question_zh, order.title_en || order.question_en, lang)}
+                              {order.title_zh || order.question_zh}
                             </p>
                             <div className="mt-1 flex items-center justify-between">
                               <span className="text-[10px] text-muted-foreground">
@@ -606,16 +593,17 @@ export default function SoccerPage() {
 function MatchCard({
   event,
   active,
-  lang,
   onClick,
 }: {
   event: SoccerEvent
   active: boolean
-  lang: Lang
   onClick: () => void
 }) {
-  const home = pickName(event.home_team_zh, event.home_team_en, lang)
-  const away = pickName(event.away_team_zh, event.away_team_en, lang)
+  const homeZh = event.home_team_zh || event.home_team_en || '-'
+  const awayZh = event.away_team_zh || event.away_team_en || '-'
+  const homeEn = event.home_team_en || event.home_team_zh || ''
+  const awayEn = event.away_team_en || event.away_team_zh || ''
+  const hasEn = (event.home_team_en && event.home_team_zh) || (event.away_team_en && event.away_team_zh)
   return (
     <div
       role="button"
@@ -641,8 +629,13 @@ function MatchCard({
           </div>
           <div className="min-w-0">
             <p className="truncate text-xs font-semibold text-foreground">
-              {home} <span className="text-muted-foreground">vs</span> {away}
+              {homeZh} <span className="text-muted-foreground">vs</span> {awayZh}
             </p>
+            {hasEn && (
+              <p className="truncate text-[10px] text-muted-foreground">
+                {homeEn} vs {awayEn}
+              </p>
+            )}
             <p className="truncate text-[10px] text-muted-foreground">
               {event.league || '足球'} · {formatTime(event.end_time)}
             </p>
@@ -732,7 +725,6 @@ function MarketGroups({
   favoriteIds,
   collapsedTypes,
   selectedEvent,
-  lang,
   onToggleFavorite,
   onToggleCollapse,
   onSelectOutcome,
@@ -743,7 +735,6 @@ function MarketGroups({
   favoriteIds: Set<string>
   collapsedTypes: Set<string>
   selectedEvent: SoccerEvent | null
-  lang: Lang
   onToggleFavorite: (marketId: string) => void
   onToggleCollapse: (type: string) => void
   onSelectOutcome: (event: SoccerEvent, market: SoccerMarket, idx: number) => void
@@ -763,7 +754,6 @@ function MarketGroups({
           livePrices={prices}
           selected={selected}
           isFavorite={favoriteIds.has(market.id)}
-          lang={lang}
           onSelectOutcome={(idx) =>
             selectedEvent && onSelectOutcome(selectedEvent, market, idx)
           }
@@ -828,7 +818,6 @@ function MarketCard({
   livePrices,
   selected,
   isFavorite,
-  lang,
   onSelectOutcome,
   onToggleFavorite,
 }: {
@@ -836,7 +825,6 @@ function MarketCard({
   livePrices: Record<string, { bid: number | null; ask: number | null }>
   selected: SelectedOutcome | null
   isFavorite: boolean
-  lang: Lang
   onSelectOutcome: (idx: number) => void
   onToggleFavorite: () => void
 }) {
@@ -856,7 +844,7 @@ function MarketCard({
       <div className="mb-2 flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium leading-snug text-foreground">
-            {pickName(market.question_zh, market.question_en, lang)}
+            {market.question_zh || market.question_en}
           </p>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <span className="inline-flex rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
