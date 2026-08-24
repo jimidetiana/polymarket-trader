@@ -48,6 +48,7 @@ export interface SelectedOutcome {
   marketId: string
   tokenId: string
   outcomeName: string
+  outcomeIdx: number
   price: number
   market: SoccerMarket
   event: SoccerEvent

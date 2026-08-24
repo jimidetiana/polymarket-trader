@@ -156,6 +156,20 @@ app.post('/api/soccer/orders/:id/cancel', asyncHandler(async (req, res) => {
   res.json({ success: true, message: result.message });
 }));
 
+app.delete('/api/soccer/orders/:id', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) {
+    res.status(400).json('无效的订单 ID');
+    return;
+  }
+  const [result] = await pool.query('DELETE FROM soccer_orders WHERE id = ?', [id]);
+  if ((result as any).affectedRows === 0) {
+    res.status(404).json('订单不存在');
+    return;
+  }
+  res.json('订单已删除');
+}));
+
 app.post('/api/soccer/orders/cancel-all', asyncHandler(async (_req, res) => {
   const result = await cancelAllOrders();
   if (!result.success) {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp, Wallet, ListOrdered, XCircle } from 'lucide-react'
+import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp, Wallet, ListOrdered, XCircle, Trash2 } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { SdkOrderBookAdapter } from '@/components/sdk-order-book'
 import { OrderForm } from '@/components/order-form'
@@ -211,6 +211,7 @@ export default function SoccerPage() {
       marketId,
       tokenId,
       outcomeName,
+      outcomeIdx,
       price,
       market,
       event,
@@ -261,6 +262,18 @@ export default function SoccerPage() {
       loadOrders()
     } catch (err) {
       alert(`取消失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  async function handleDeleteOrder(orderId: number) {
+    if (!confirm('确定删除该订单记录吗？')) return
+    try {
+      const res = await fetch(`/api/soccer/orders/${orderId}`, { method: 'DELETE' })
+      const msg = await res.text()
+      alert(msg)
+      loadOrders()
+    } catch (err) {
+      alert(`删除失败：${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -428,7 +441,7 @@ export default function SoccerPage() {
           }}
         >
           <div className="flex min-h-full items-start justify-center py-6">
-            <div className="w-full max-w-lg rounded-xl border border-border bg-card shadow-2xl">
+            <div className="w-full max-w-3xl rounded-xl border border-border bg-card shadow-2xl">
               <div className="flex items-center justify-between border-b border-border px-4 py-3">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold text-foreground">
@@ -453,137 +466,162 @@ export default function SoccerPage() {
               </div>
 
               <div className="p-4">
-                <div className="mb-4 rounded-lg border border-primary/30 bg-primary/5 p-3">
-                  <p className="text-[10px] text-muted-foreground">已选盘口</p>
-                  <p className="text-sm font-medium text-foreground">
-                    {selected.market.question_zh || selected.market.question_en}
-                  </p>
-                  <p className="mt-1 font-mono text-2xl font-bold text-primary">
-                    {formatPercent(selected.price)}
-                  </p>
-                </div>
-
-                <SdkOrderBookAdapter
-                  tokenId={selected.tokenId}
-                  livePrice={prices[selected.tokenId]}
-                  wsOrderBook={orderBooks[selected.tokenId]}
-                  initialPrice={selected.price}
-                  onPriceClick={(priceCents, side) => setOrderBookClick({ priceCents, side, timestamp: Date.now() })}
-                />
-
-                {/* Wallet balance */}
-                <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-card p-3">
-                  <div className="flex items-center gap-2">
-                    <Wallet className="h-4 w-4 text-primary" />
-                    <span className="text-xs text-muted-foreground">可用余额</span>
-                  </div>
-                  <span className="text-sm font-bold text-foreground">
-                    ${wallet ? formatUsdc(wallet.balance_usdc) : '--'}
-                  </span>
-                </div>
-
-                <div className="mt-4 rounded-xl border border-border bg-card p-4">
-                  <OrderForm
-                    outcomeName={selected.outcomeName}
-                    marketQuestion={selected.market.question_zh || selected.market.question_en || ''}
-                    currentPrice={selected.price}
-                    maxAmount={wallet ? wallet.balance_usdc : 10000}
-                    externalPrice={orderBookClick}
-                    onSubmit={handleOrderSubmit}
-                  />
-                </div>
-
-                {orderMessage && (
-                  <div
-                    className={cn(
-                      'mt-3 flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs',
-                      orderMessage.error
-                        ? 'border-error/30 bg-error/10 text-error'
-                        : 'border-success/30 bg-success/10 text-success',
-                    )}
-                  >
-                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                    <div className="flex-1">
-                      {orderMessage.text}
-                      {orderMessage.simulated && (
-                        <span className="ml-1 rounded bg-warning/20 px-1 py-0.5 text-[10px] text-warning">
-                          模拟
-                        </span>
-                      )}
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  {/* Left: Order book */}
+                  <div className="space-y-4">
+                    <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
+                      <p className="text-[10px] text-muted-foreground">已选盘口</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {(() => {
+                          const m = selected.market
+                          const isSpread = m.market_type === 'spread'
+                          const lineNum = Number(m.line) || 0
+                          if (isSpread && lineNum !== 0) {
+                            const outcomeLine = selected.outcomeIdx === 0 ? lineNum : -lineNum
+                            return `${selected.outcomeName} ${outcomeLine > 0 ? '+' : ''}${outcomeLine}`
+                          }
+                          return m.question_zh || m.question_en
+                        })()}
+                      </p>
+                      <p className="mt-1 font-mono text-2xl font-bold text-primary">
+                        {formatPercent(selected.price)}
+                      </p>
                     </div>
-                  </div>
-                )}
 
-                {/* Orders toggle */}
-                <button
-                  type="button"
-                  onClick={() => setShowOrders(!showOrders)}
-                  className="mt-3 flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-foreground hover:bg-muted/50"
-                >
-                  <div className="flex items-center gap-2">
-                    <ListOrdered className="h-3.5 w-3.5 text-primary" />
-                    <span className="font-medium">我的订单</span>
-                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
-                      {orders.length}
-                    </span>
+                    <SdkOrderBookAdapter
+                      tokenId={selected.tokenId}
+                      livePrice={prices[selected.tokenId]}
+                      wsOrderBook={orderBooks[selected.tokenId]}
+                      initialPrice={selected.price}
+                      onPriceClick={(priceCents, side) => setOrderBookClick({ priceCents, side, timestamp: Date.now() })}
+                    />
                   </div>
-                  {showOrders ? (
-                    <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
-                  ) : (
-                    <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-                  )}
-                </button>
 
-                {showOrders && (
-                  <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-border bg-card">
-                    {!orders.length ? (
-                      <div className="p-4 text-center text-xs text-muted-foreground">
-                        暂无订单
+                  {/* Right: Order form */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between rounded-lg border border-border bg-card p-3">
+                      <div className="flex items-center gap-2">
+                        <Wallet className="h-4 w-4 text-primary" />
+                        <span className="text-xs text-muted-foreground">可用余额</span>
                       </div>
-                    ) : (
-                      <div className="divide-y divide-border">
-                        {orders.slice(0, 20).map((order: any) => (
-                          <div key={order.id} className="p-2">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-1.5">
-                                <span className={cn(
-                                  'rounded px-1.5 py-0.5 text-[10px] font-medium',
-                                  order.side === 'BUY'
-                                    ? 'bg-success/10 text-success'
-                                    : 'bg-error/10 text-error',
-                                )}>
-                                  {order.side === 'BUY' ? '买入' : '卖出'}
-                                </span>
-                                <span className="text-xs font-medium text-foreground">
-                                  {order.size} @ {(Number(order.price) * 100).toFixed(1)}%
-                                </span>
-                              </div>
-                              <OrderStatusBadge status={order.order_status} />
-                            </div>
-                            <p className="mt-1 truncate text-[10px] text-muted-foreground">
-                              {order.title_zh || order.question_zh}
-                            </p>
-                            <div className="mt-1 flex items-center justify-between">
-                              <span className="text-[10px] text-muted-foreground">
-                                {formatTime(order.created_at)}
-                              </span>
-                              {(order.order_status === 'open' || order.order_status === 'pending' || order.order_status === 'simulated') && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleCancelOrder(order.id)}
-                                  className="inline-flex items-center gap-1 rounded border border-error/30 bg-error/10 px-1.5 py-0.5 text-[10px] font-medium text-error hover:bg-error/20"
-                                >
-                                  <XCircle className="h-3 w-3" />
-                                  取消
-                                </button>
-                              )}
-                            </div>
+                      <span className="text-sm font-bold text-foreground">
+                        ${wallet ? formatUsdc(wallet.balance_usdc) : '--'}
+                      </span>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-card p-4">
+                      <OrderForm
+                        outcomeName={selected.outcomeName}
+                        marketQuestion={selected.market.question_zh || selected.market.question_en || ''}
+                        currentPrice={selected.price}
+                        maxAmount={wallet ? wallet.balance_usdc : 10000}
+                        externalPrice={orderBookClick}
+                        onSubmit={handleOrderSubmit}
+                      />
+                    </div>
+
+                    {orderMessage && (
+                      <div
+                        className={cn(
+                          'flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs',
+                          orderMessage.error
+                            ? 'border-error/30 bg-error/10 text-error'
+                            : 'border-success/30 bg-success/10 text-success',
+                        )}
+                      >
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                        <div className="flex-1">
+                          {orderMessage.text}
+                          {orderMessage.simulated && (
+                            <span className="ml-1 rounded bg-warning/20 px-1 py-0.5 text-[10px] text-warning">
+                              模拟
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Orders toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setShowOrders(!showOrders)}
+                      className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-foreground hover:bg-muted/50"
+                    >
+                      <div className="flex items-center gap-2">
+                        <ListOrdered className="h-3.5 w-3.5 text-primary" />
+                        <span className="font-medium">我的订单</span>
+                        <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                          {orders.length}
+                        </span>
+                      </div>
+                      {showOrders ? (
+                        <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
+                      ) : (
+                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                      )}
+                    </button>
+
+                    {showOrders && (
+                      <div className="max-h-64 overflow-y-auto rounded-lg border border-border bg-card">
+                        {!orders.length ? (
+                          <div className="p-4 text-center text-xs text-muted-foreground">
+                            暂无订单
                           </div>
-                        ))}
+                        ) : (
+                          <div className="divide-y divide-border">
+                            {orders.slice(0, 20).map((order: any) => (
+                              <div key={order.id} className="p-2">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={cn(
+                                      'rounded px-1.5 py-0.5 text-[10px] font-medium',
+                                      order.side === 'BUY'
+                                        ? 'bg-success/10 text-success'
+                                        : 'bg-error/10 text-error',
+                                    )}>
+                                      {order.side === 'BUY' ? '买入' : '卖出'}
+                                    </span>
+                                    <span className="text-xs font-medium text-foreground">
+                                      {order.size} @ {(Number(order.price) * 100).toFixed(1)}%
+                                    </span>
+                                  </div>
+                                  <OrderStatusBadge status={order.order_status} />
+                                </div>
+                                <p className="mt-1 truncate text-[10px] text-muted-foreground">
+                                  {order.title_zh || order.question_zh}
+                                </p>
+                                <div className="mt-1 flex items-center justify-between">
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {formatTime(order.created_at)}
+                                  </span>
+                                  {(order.order_status === 'open' || order.order_status === 'pending' || order.order_status === 'simulated') ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCancelOrder(order.id)}
+                                      className="inline-flex items-center gap-1 rounded border border-error/30 bg-error/10 px-1.5 py-0.5 text-[10px] font-medium text-error hover:bg-error/20"
+                                    >
+                                      <XCircle className="h-3 w-3" />
+                                      取消
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteOrder(order.id)}
+                                      className="inline-flex items-center gap-1 rounded border border-muted-foreground/30 bg-muted/10 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-muted/20"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                      删除
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
-                )}
+                </div>
               </div>
             </div>
           </div>
@@ -885,6 +923,11 @@ function MarketCard({
           const accentColor = getOutcomeColor(name, idx, outcomes.length)
           const roundedClass = getOutcomeRoundedClass(idx, outcomes.length)
           const isSelected = selected?.tokenId === tokenId
+          const isSpread = market.market_type === 'spread'
+          const lineNum = Number(market.line) || 0
+          const outcomeLine = isSpread && lineNum !== 0
+            ? (idx === 0 ? lineNum : -lineNum)
+            : null
           return (
             <button
               key={idx}
@@ -899,6 +942,11 @@ function MarketCard({
               <span className="max-w-full truncate px-1 text-[10px] font-medium text-muted-foreground">
                 {name}
               </span>
+              {outcomeLine !== null && (
+                <span className="text-[9px] text-muted-foreground">
+                  {outcomeLine > 0 ? `+${outcomeLine}` : outcomeLine}
+                </span>
+              )}
               <span
                 className="font-mono text-base font-bold"
                 style={{ color: accentColor }}

@@ -30,15 +30,7 @@ function isSimulated(): boolean {
   return !config.privateKey || config.privateKey.startsWith('0x0000');
 }
 
-// 获取 tickSize（简化版，默认 0.001）
-function getTickSize(): string {
-  return '0.001';
-}
-
-// 判断是否为负风险市场（简化版，默认 false）
-function isNegRisk(): boolean {
-  return false;
-}
+// V2 客户端自动从 API 解析 tickSize 和 negRisk，无需手动传入
 
 export interface PlaceOrderParams {
   market_id: string;
@@ -106,23 +98,25 @@ export async function placeOrder(params: PlaceOrderParams): Promise<PlaceOrderRe
     const client = await getClobClient();
     await getV2Creds();
 
-    const orderArgs = {
-      tokenID: token_id,
-      price,
-      size,
-      side: side === 'BUY' ? 'BUY' : 'SELL' as any,
-    };
-
-    const options = {
-      tickSize: getTickSize(),
-      negRisk: isNegRisk(),
-    };
-
     let response: any;
     if (type === 'market') {
-      response = await client.createAndPostMarketOrder(orderArgs, options);
+      // 市价单: BUY 用 USDC 金额, SELL 用份额数
+      const marketOrderArgs = {
+        tokenID: token_id,
+        price,
+        amount: side === 'BUY' ? size * price : size,
+        side: side === 'BUY' ? 'BUY' : 'SELL' as any,
+      };
+      response = await client.createAndPostMarketOrder(marketOrderArgs);
     } else {
-      response = await client.createAndPostOrder(orderArgs, options, 'GTC');
+      // 限价单: 使用 size (份额数)
+      const limitOrderArgs = {
+        tokenID: token_id,
+        price,
+        size,
+        side: side === 'BUY' ? 'BUY' : 'SELL' as any,
+      };
+      response = await client.createAndPostOrder(limitOrderArgs, {}, 'GTC');
     }
 
     const data = response as { orderID?: string; success?: boolean; error?: string };
