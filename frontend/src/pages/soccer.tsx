@@ -50,6 +50,7 @@ export default function SoccerPage() {
   const [wallet, setWallet] = useState<WalletInfo | null>(null)
   const [orders, setOrders] = useState<any[]>([])
   const [showOrders, setShowOrders] = useState(false)
+  const [orderBookClick, setOrderBookClick] = useState<{ priceCents: number; side: 'BUY' | 'SELL'; timestamp: number } | null>(null)
 
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(() => {
     try {
@@ -454,6 +455,7 @@ export default function SoccerPage() {
                   tokenId={selected.tokenId}
                   livePrice={prices[selected.tokenId]}
                   initialPrice={selected.price}
+                  onPriceClick={(priceCents, side) => setOrderBookClick({ priceCents, side, timestamp: Date.now() })}
                 />
 
                 {/* Wallet balance */}
@@ -473,6 +475,7 @@ export default function SoccerPage() {
                     marketQuestion={selected.market.question_zh || selected.market.question_en || ''}
                     currentPrice={selected.price}
                     maxAmount={wallet ? wallet.balance_usdc : 10000}
+                    externalPrice={orderBookClick}
                     onSubmit={handleOrderSubmit}
                   />
                 </div>

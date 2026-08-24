@@ -6,6 +6,7 @@ interface CompactOrderBookProps {
   tokenId: string
   livePrice?: LivePrice
   initialPrice: number
+  onPriceClick?: (priceCents: number, side: 'BUY' | 'SELL') => void
 }
 
 const POLL_INTERVAL_MS = 3000
@@ -27,6 +28,7 @@ export function SdkOrderBookAdapter({
   tokenId,
   livePrice,
   initialPrice,
+  onPriceClick,
 }: CompactOrderBookProps) {
   const [asks, setAsks] = useState<BookLevel[]>([])
   const [bids, setBids] = useState<BookLevel[]>([])
@@ -106,12 +108,18 @@ export function SdkOrderBookAdapter({
         </span>
       </div>
 
+      {onPriceClick && (
+        <div className="border-b border-border bg-primary/5 px-4 py-1 text-center text-[10px] text-primary">
+          点击价格快速下单
+        </div>
+      )}
+
       <div className="grid grid-cols-2 divide-x divide-border">
         {/* Asks: lowest ask at top, ascending */}
         <div className="flex flex-col">
           <div className="flex items-center justify-between border-b border-border bg-rose-500/5 px-3 py-1.5">
             <span className="text-xs font-semibold text-rose-500">卖盘 Asks</span>
-            <span className="text-[10px] text-muted-foreground">最低卖价在上</span>
+            <span className="text-[10px] text-muted-foreground">点击买入</span>
           </div>
           <div className="grid grid-cols-2 px-3 py-1.5 text-[10px] text-muted-foreground">
             <span>价格</span>
@@ -119,9 +127,11 @@ export function SdkOrderBookAdapter({
           </div>
           <div className="max-h-64 overflow-y-auto">
             {displayAsks.map((ask, idx) => (
-              <div
+              <button
                 key={`ask-${idx}`}
-                className="relative grid grid-cols-2 px-3 py-1.5 text-xs"
+                type="button"
+                onClick={() => onPriceClick?.(ask.price, 'BUY')}
+                className="relative grid w-full grid-cols-2 px-3 py-1.5 text-xs hover:bg-rose-500/10"
               >
                 <div
                   className="absolute right-0 top-0 bottom-0 bg-rose-500/10"
@@ -129,7 +139,7 @@ export function SdkOrderBookAdapter({
                 />
                 <span className="relative font-mono text-rose-500">{formatCents(ask.price)}¢</span>
                 <span className="relative text-right text-foreground">{formatQty(ask.quantity)}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -138,7 +148,7 @@ export function SdkOrderBookAdapter({
         <div className="flex flex-col">
           <div className="flex items-center justify-between border-b border-border bg-emerald-500/5 px-3 py-1.5">
             <span className="text-xs font-semibold text-emerald-500">买盘 Bids</span>
-            <span className="text-[10px] text-muted-foreground">最高买价在上</span>
+            <span className="text-[10px] text-muted-foreground">点击卖出</span>
           </div>
           <div className="grid grid-cols-2 px-3 py-1.5 text-[10px] text-muted-foreground">
             <span>价格</span>
@@ -146,9 +156,11 @@ export function SdkOrderBookAdapter({
           </div>
           <div className="max-h-64 overflow-y-auto">
             {displayBids.map((bid, idx) => (
-              <div
+              <button
                 key={`bid-${idx}`}
-                className="relative grid grid-cols-2 px-3 py-1.5 text-xs"
+                type="button"
+                onClick={() => onPriceClick?.(bid.price, 'SELL')}
+                className="relative grid w-full grid-cols-2 px-3 py-1.5 text-xs hover:bg-emerald-500/10"
               >
                 <div
                   className="absolute left-0 top-0 bottom-0 bg-emerald-500/10"
@@ -156,7 +168,7 @@ export function SdkOrderBookAdapter({
                 />
                 <span className="relative font-mono text-emerald-500">{formatCents(bid.price)}¢</span>
                 <span className="relative text-right text-foreground">{formatQty(bid.quantity)}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>

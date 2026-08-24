@@ -1,12 +1,19 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Minus, Plus, AlertCircle } from 'lucide-react'
 import { cn, formatPercent } from '@/lib/utils'
+
+interface ExternalPriceUpdate {
+  priceCents: number
+  side: 'BUY' | 'SELL'
+  timestamp: number
+}
 
 interface OrderFormProps {
   outcomeName: string
   marketQuestion: string
   currentPrice: number
   maxAmount?: number
+  externalPrice?: ExternalPriceUpdate | null
   onSubmit: (values: {
     side: 'BUY' | 'SELL'
     size: number
@@ -20,12 +27,23 @@ export function OrderForm({
   marketQuestion,
   currentPrice,
   maxAmount = 10000,
+  externalPrice,
   onSubmit,
 }: OrderFormProps) {
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
   const [type, setType] = useState<'market' | 'limit'>('market')
   const [size, setSize] = useState(10)
   const [limitPrice, setLimitPrice] = useState(Math.round(currentPrice * 100))
+  const formRef = useRef<HTMLFormElement>(null)
+
+  useEffect(() => {
+    if (externalPrice) {
+      setSide(externalPrice.side)
+      setType('limit')
+      setLimitPrice(externalPrice.priceCents)
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [externalPrice?.timestamp])
 
   const price = type === 'market' ? currentPrice : limitPrice / 100
   const total = size * price
@@ -45,7 +63,7 @@ export function OrderForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form ref={formRef} onSubmit={handleSubmit} className="space-y-4">
       <div className="flex items-center justify-between rounded-lg border border-border bg-muted/40 p-3">
         <div className="min-w-0">
           <p className="truncate text-xs text-muted-foreground">{marketQuestion}</p>
