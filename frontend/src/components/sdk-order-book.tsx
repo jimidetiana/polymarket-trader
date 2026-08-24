@@ -1,15 +1,14 @@
 import { useEffect, useState } from 'react'
 import { fetchOrderBook } from '@/lib/api'
-import type { LivePrice } from '@/types'
+import type { LivePrice, OrderBook } from '@/types'
 
 interface CompactOrderBookProps {
   tokenId: string
   livePrice?: LivePrice
   initialPrice: number
+  wsOrderBook?: OrderBook
   onPriceClick?: (priceCents: number, side: 'BUY' | 'SELL') => void
 }
-
-const POLL_INTERVAL_MS = 3000
 
 interface BookLevel {
   price: number
@@ -24,62 +23,54 @@ function formatQty(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
 
+function parseAsks(levels: { price: number; size: number }[]): BookLevel[] {
+  return levels
+    .map((l) => ({ price: Math.round(l.price * 100), quantity: l.size }))
+    .filter((l) => l.price > 0)
+    .sort((a, b) => a.price - b.price)
+}
+
+function parseBids(levels: { price: number; size: number }[]): BookLevel[] {
+  return levels
+    .map((l) => ({ price: Math.round(l.price * 100), quantity: l.size }))
+    .filter((l) => l.price > 0)
+    .sort((a, b) => b.price - a.price)
+}
+
 export function SdkOrderBookAdapter({
   tokenId,
   livePrice,
   initialPrice,
+  wsOrderBook,
   onPriceClick,
 }: CompactOrderBookProps) {
-  const [asks, setAsks] = useState<BookLevel[]>([])
-  const [bids, setBids] = useState<BookLevel[]>([])
+  const [restBook, setRestBook] = useState<{ bids: BookLevel[]; asks: BookLevel[] } | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
 
   const price = livePrice?.bid ?? livePrice?.ask ?? initialPrice
 
+  // One-time REST load: fills the gap before WebSocket snapshot arrives
   useEffect(() => {
     let mounted = true
-    let timer: ReturnType<typeof setInterval> | null = null
-
-    async function load() {
-      try {
-        const book = await fetchOrderBook(tokenId)
+    fetchOrderBook(tokenId)
+      .then((book) => {
         if (!mounted) return
-        const parsedAsks = (book.asks || [])
-          .map((level) => ({
-            price: Math.round(Number(level.price) * 100),
-            quantity: Number(level.size),
-          }))
-          .filter((l) => l.price > 0)
-          .sort((a, b) => a.price - b.price)
-        const parsedBids = (book.bids || [])
-          .map((level) => ({
-            price: Math.round(Number(level.price) * 100),
-            quantity: Number(level.size),
-          }))
-          .filter((l) => l.price > 0)
-          .sort((a, b) => b.price - a.price)
-        setAsks(parsedAsks)
-        setBids(parsedBids)
-        setError(null)
-      } catch (err) {
-        if (!mounted) return
-        setError(err instanceof Error ? err.message : '加载失败')
-      } finally {
+        setRestBook({ asks: parseAsks(book.asks || []), bids: parseBids(book.bids || []) })
+      })
+      .catch(() => {})
+      .finally(() => {
         if (mounted) setLoading(false)
-      }
-    }
-
-    load()
-    timer = setInterval(load, POLL_INTERVAL_MS)
-
-    return () => {
-      mounted = false
-      if (timer) clearInterval(timer)
-    }
+      })
+    return () => { mounted = false }
   }, [tokenId])
 
-  // Fallback synthetic depth only before first successful load.
+  // WebSocket data is primary; REST is fallback before WS snapshot
+  const wsAsks = wsOrderBook?.asks ? parseAsks(wsOrderBook.asks) : null
+  const wsBids = wsOrderBook?.bids ? parseBids(wsOrderBook.bids) : null
+  const asks = wsAsks ?? restBook?.asks ?? []
+  const bids = wsBids ?? restBook?.bids ?? []
+
+  // Fallback synthetic depth only before first real data
   const fallbackAsks: BookLevel[] = [
     { price: Math.round((price + 0.006) * 100), quantity: 900 },
     { price: Math.round((price + 0.004) * 100), quantity: 1800 },
@@ -99,12 +90,14 @@ export function SdkOrderBookAdapter({
   const maxAskQty = Math.max(...displayAsks.map((a) => a.quantity), 1)
   const maxBidQty = Math.max(...displayBids.map((b) => b.quantity), 1)
 
+  const isLive = !!(wsAsks && wsBids)
+
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
         <h3 className="text-sm font-semibold text-foreground">盘口深度</h3>
         <span className="font-mono text-xs text-muted-foreground">
-          {loading && !asks.length ? '加载中...' : error ? `错误: ${error}` : '实时'}
+          {loading && !asks.length ? '加载中...' : isLive ? 'WS 实时' : '连接中...'}
         </span>
       </div>
 

@@ -149,7 +149,7 @@ export default function SoccerPage() {
     () => markets.flatMap((m) => (m.clob_token_ids || []).filter(Boolean) as string[]),
     [markets],
   )
-  const { prices, status: wsStatus } = useSoccerWs(tokenIds)
+  const { prices, orderBooks, status: wsStatus } = useSoccerWs(tokenIds)
 
   async function loadEvents() {
     setLoading(true)
@@ -464,6 +464,7 @@ export default function SoccerPage() {
                 <SdkOrderBookAdapter
                   tokenId={selected.tokenId}
                   livePrice={prices[selected.tokenId]}
+                  wsOrderBook={orderBooks[selected.tokenId]}
                   initialPrice={selected.price}
                   onPriceClick={(priceCents, side) => setOrderBookClick({ priceCents, side, timestamp: Date.now() })}
                 />
