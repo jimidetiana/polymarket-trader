@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
-import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp } from 'lucide-react'
+import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp, Wallet, ListOrdered, XCircle } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { SdkOrderBookAdapter } from '@/components/sdk-order-book'
 import { OrderForm } from '@/components/order-form'
-import { cn, formatTime, formatPercent } from '@/lib/utils'
+import { cn, formatTime, formatPercent, formatUsdc } from '@/lib/utils'
 import {
   fetchEvents,
   refreshEvents,
   fetchEventMarkets,
   submitOrder,
+  cancelOrder,
+  fetchWallet,
+  fetchOrders,
+  type WalletInfo,
 } from '@/lib/api'
 import { useSoccerWs } from '@/lib/useSoccerWs'
 import {
@@ -42,7 +46,10 @@ export default function SoccerPage() {
   const [marketsLoading, setMarketsLoading] = useState(false)
 
   const [selected, setSelected] = useState<SelectedOutcome | null>(null)
-  const [orderMessage, setOrderMessage] = useState<{ text: string; error: boolean } | null>(null)
+  const [orderMessage, setOrderMessage] = useState<{ text: string; error: boolean; simulated?: boolean } | null>(null)
+  const [wallet, setWallet] = useState<WalletInfo | null>(null)
+  const [orders, setOrders] = useState<any[]>([])
+  const [showOrders, setShowOrders] = useState(false)
 
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(() => {
     try {
@@ -87,7 +94,30 @@ export default function SoccerPage() {
 
   useEffect(() => {
     loadEvents()
+    loadWallet()
+    loadOrders()
+    // 每 30 秒刷新钱包余额
+    const timer = setInterval(loadWallet, 30000)
+    return () => clearInterval(timer)
   }, [])
+
+  async function loadWallet() {
+    try {
+      const w = await fetchWallet()
+      setWallet(w)
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadOrders() {
+    try {
+      const data = await fetchOrders()
+      setOrders(data)
+    } catch {
+      // ignore
+    }
+  }
 
   useEffect(() => {
     if (!selectedEvent) {
@@ -199,19 +229,35 @@ export default function SoccerPage() {
       return
     }
     try {
-      const message = await submitOrder({
+      const result = await submitOrder({
         market_id: selected.marketId,
         token_id: selected.tokenId,
         side: values.side,
         size,
         price,
+        type: values.type,
       })
-      setOrderMessage({ text: message, error: false })
+      setOrderMessage({ text: result.message, error: false, simulated: result.simulated })
+      // 刷新钱包余额和订单列表
+      loadWallet()
+      loadOrders()
     } catch (err) {
       setOrderMessage({
         text: `下单失败：${err instanceof Error ? err.message : String(err)}`,
         error: true,
       })
+    }
+  }
+
+  async function handleCancelOrder(orderId: number) {
+    if (!confirm('确定取消该订单吗？')) return
+    try {
+      const msg = await cancelOrder(orderId)
+      alert(msg)
+      loadWallet()
+      loadOrders()
+    } catch (err) {
+      alert(`取消失败：${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -410,12 +456,23 @@ export default function SoccerPage() {
                   initialPrice={selected.price}
                 />
 
+                {/* Wallet balance */}
+                <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-card p-3">
+                  <div className="flex items-center gap-2">
+                    <Wallet className="h-4 w-4 text-primary" />
+                    <span className="text-xs text-muted-foreground">可用余额</span>
+                  </div>
+                  <span className="text-sm font-bold text-foreground">
+                    ${wallet ? formatUsdc(wallet.balance_usdc) : '--'}
+                  </span>
+                </div>
+
                 <div className="mt-4 rounded-xl border border-border bg-card p-4">
                   <OrderForm
                     outcomeName={selected.outcomeName}
                     marketQuestion={selected.market.question_zh || selected.market.question_en || ''}
                     currentPrice={selected.price}
-                    maxAmount={10000}
+                    maxAmount={wallet ? wallet.balance_usdc : 10000}
                     onSubmit={handleOrderSubmit}
                   />
                 </div>
@@ -430,7 +487,85 @@ export default function SoccerPage() {
                     )}
                   >
                     <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                    {orderMessage.text}
+                    <div className="flex-1">
+                      {orderMessage.text}
+                      {orderMessage.simulated && (
+                        <span className="ml-1 rounded bg-warning/20 px-1 py-0.5 text-[10px] text-warning">
+                          模拟
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Orders toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowOrders(!showOrders)}
+                  className="mt-3 flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-foreground hover:bg-muted/50"
+                >
+                  <div className="flex items-center gap-2">
+                    <ListOrdered className="h-3.5 w-3.5 text-primary" />
+                    <span className="font-medium">我的订单</span>
+                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                      {orders.length}
+                    </span>
+                  </div>
+                  {showOrders ? (
+                    <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                  )}
+                </button>
+
+                {showOrders && (
+                  <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-border bg-card">
+                    {!orders.length ? (
+                      <div className="p-4 text-center text-xs text-muted-foreground">
+                        暂无订单
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {orders.slice(0, 20).map((order: any) => (
+                          <div key={order.id} className="p-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <span className={cn(
+                                  'rounded px-1.5 py-0.5 text-[10px] font-medium',
+                                  order.side === 'BUY'
+                                    ? 'bg-success/10 text-success'
+                                    : 'bg-error/10 text-error',
+                                )}>
+                                  {order.side === 'BUY' ? '买入' : '卖出'}
+                                </span>
+                                <span className="text-xs font-medium text-foreground">
+                                  {order.size} @ {(Number(order.price) * 100).toFixed(1)}%
+                                </span>
+                              </div>
+                              <OrderStatusBadge status={order.order_status} />
+                            </div>
+                            <p className="mt-1 truncate text-[10px] text-muted-foreground">
+                              {order.title_zh || order.question_zh}
+                            </p>
+                            <div className="mt-1 flex items-center justify-between">
+                              <span className="text-[10px] text-muted-foreground">
+                                {formatTime(order.created_at)}
+                              </span>
+                              {(order.order_status === 'open' || order.order_status === 'pending' || order.order_status === 'simulated') && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleCancelOrder(order.id)}
+                                  className="inline-flex items-center gap-1 rounded border border-error/30 bg-error/10 px-1.5 py-0.5 text-[10px] font-medium text-error hover:bg-error/20"
+                                >
+                                  <XCircle className="h-3 w-3" />
+                                  取消
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -510,6 +645,29 @@ function StatusBadge({ status }: { status: string }) {
     },
   }
   const info = map[status] || map.not_started
+  return (
+    <span
+      className={cn(
+        'inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-medium',
+        info.className,
+      )}
+    >
+      {info.label}
+    </span>
+  )
+}
+
+function OrderStatusBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; className: string }> = {
+    open: { label: '挂单中', className: 'bg-primary/10 text-primary border-primary/30' },
+    pending: { label: '处理中', className: 'bg-warning/15 text-warning border-warning/30' },
+    simulated: { label: '模拟', className: 'bg-warning/15 text-warning border-warning/30' },
+    filled: { label: '已成交', className: 'bg-success/15 text-success border-success/30' },
+    cancelled: { label: '已取消', className: 'bg-muted text-muted-foreground border-border' },
+    failed: { label: '失败', className: 'bg-error/10 text-error border-error/30' },
+    closed: { label: '已结束', className: 'bg-muted text-muted-foreground border-border' },
+  }
+  const info = map[status] || { label: status, className: 'bg-muted text-muted-foreground border-border' }
   return (
     <span
       className={cn(

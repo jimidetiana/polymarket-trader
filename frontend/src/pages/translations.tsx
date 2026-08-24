@@ -1,70 +1,203 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   RefreshCw,
-  Database,
-  FileText,
+  Users,
+  Trophy,
   CheckCircle2,
   Sparkles,
   Download,
-  Copy,
   Upload,
+  Copy,
   CheckCircle,
   Save,
-  Code,
-  ChevronDown,
+  Trash2,
+  Plus,
+  Database,
+  Search,
+  Filter,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  Square,
+  CheckSquare,
 } from 'lucide-react'
 import { Layout } from '@/components/layout'
-import { cn, formatTime, escapeHtml } from '@/lib/utils'
+import { cn, escapeHtml } from '@/lib/utils'
 import {
-  fetchTranslations,
-  fetchUntranslated,
-  saveEventTranslation,
-  saveMarketTranslation,
-  importTranslations,
+  fetchDictTeams,
+  fetchDictLeagues,
+  fetchDictStats,
+  syncDictFromEvents,
+  applyDictionaryToEvents,
+  deduplicateTeams,
+  importDict,
+  updateDictTeam,
+  updateDictLeague,
+  deleteDictTeam,
+  deleteDictLeague,
+  saveDictTeam,
+  saveDictLeague,
+  type DictTeam,
+  type DictLeague,
 } from '@/lib/api'
-import type { SoccerEvent, SoccerMarket } from '@/types'
 
-const FORMAT_TEMPLATE = [
-  {
-    id: 'event-id-1',
-    title_zh: '中文赛事标题',
-    home_team_zh: '主队中文',
-    away_team_zh: '客队中文',
-    league: '联赛中文',
-  },
+type TabType = 'teams' | 'leagues'
+const PAGE_SIZE = 20
+
+const TEAM_EXPORT_TEMPLATE = [
+  { name_en: 'Manchester City', name_zh: '曼城', league: 'English Premier League' },
+]
+
+const LEAGUE_EXPORT_TEMPLATE = [
+  { name_en: 'English Premier League', name_zh: '英格兰足球超级联赛' },
 ]
 
 export default function TranslationsPage() {
-  const [events, setEvents] = useState<SoccerEvent[]>([])
-  const [untranslatedEvents, setUntranslatedEvents] = useState<SoccerEvent[]>([])
+  const [activeTab, setActiveTab] = useState<TabType>('teams')
+  const [teams, setTeams] = useState<DictTeam[]>([])
+  const [leagues, setLeagues] = useState<DictLeague[]>([])
+  const [stats, setStats] = useState<{
+    teams: { total: number; translated: number; untranslated: number }
+    leagues: { total: number; translated: number; untranslated: number }
+  } | null>(null)
   const [loading, setLoading] = useState(false)
-  const [exportScope, setExportScope] = useState<'all' | 'untranslated'>('all')
-  const [exportStatus, setExportStatus] = useState('')
+  const [search, setSearch] = useState('')
+  const [leagueFilter, setLeagueFilter] = useState<string>('')
+  const [filterUntranslated, setFilterUntranslated] = useState(false)
   const [importJson, setImportJson] = useState('')
   const [importStatus, setImportStatus] = useState('')
-
-  const translatedCount = Math.max(0, events.length - untranslatedEvents.length)
-
-  const exportPayload = useMemo(
-    () => (exportScope === 'all' ? events : untranslatedEvents).map(buildExportItem),
-    [events, untranslatedEvents, exportScope],
-  )
+  const [syncStatus, setSyncStatus] = useState('')
+  const [teamPage, setTeamPage] = useState(1)
+  const [leaguePage, setLeaguePage] = useState(1)
+  const [selectedTeamIds, setSelectedTeamIds] = useState<Set<number>>(new Set())
+  const [selectedLeagueIds, setSelectedLeagueIds] = useState<Set<number>>(new Set())
+  const [exportStatus, setExportStatus] = useState('')
 
   useEffect(() => {
     loadData()
   }, [])
 
+  useEffect(() => {
+    setTeamPage(1)
+    setLeaguePage(1)
+    setSelectedTeamIds(new Set())
+    setSelectedLeagueIds(new Set())
+  }, [search, leagueFilter, filterUntranslated, activeTab])
+
   async function loadData() {
     setLoading(true)
     try {
-      const [all, untranslated] = await Promise.all([fetchTranslations(), fetchUntranslated(200)])
-      setEvents(all)
-      setUntranslatedEvents(untranslated)
-      setExportStatus(`当前可导出 ${exportPayload.length} 条`)
+      const [teamsData, leaguesData, statsData] = await Promise.all([
+        fetchDictTeams(),
+        fetchDictLeagues(),
+        fetchDictStats(),
+      ])
+      setTeams(teamsData)
+      setLeagues(leaguesData)
+      setStats(statsData)
     } catch (err) {
-      setImportStatus(`加载失败：${err instanceof Error ? err.message : String(err)}`)
+      console.error('加载失败:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const uniqueLeagues = useMemo(() => {
+    const set = new Set<string>()
+    teams.forEach((t) => {
+      if (t.league) set.add(t.league)
+    })
+    return Array.from(set).sort()
+  }, [teams])
+
+  const filteredTeams = useMemo(() => {
+    return teams.filter((t) => {
+      if (filterUntranslated && t.name_zh) return false
+      if (leagueFilter && t.league !== leagueFilter) return false
+      if (search) {
+        const q = search.toLowerCase()
+        if (
+          !t.name_en.toLowerCase().includes(q) &&
+          !(t.name_zh?.toLowerCase().includes(q))
+        ) {
+          return false
+        }
+      }
+      return true
+    })
+  }, [teams, search, leagueFilter, filterUntranslated])
+
+  const filteredLeagues = useMemo(() => {
+    return leagues.filter((l) => {
+      if (filterUntranslated && l.name_zh) return false
+      if (search) {
+        const q = search.toLowerCase()
+        if (
+          !l.name_en.toLowerCase().includes(q) &&
+          !(l.name_zh?.toLowerCase().includes(q))
+        ) {
+          return false
+        }
+      }
+      return true
+    })
+  }, [leagues, search, filterUntranslated])
+
+  const teamTotalPages = Math.max(1, Math.ceil(filteredTeams.length / PAGE_SIZE))
+  const leagueTotalPages = Math.max(1, Math.ceil(filteredLeagues.length / PAGE_SIZE))
+
+  const pagedTeams = useMemo(() => {
+    const start = (teamPage - 1) * PAGE_SIZE
+    return filteredTeams.slice(start, start + PAGE_SIZE)
+  }, [filteredTeams, teamPage])
+
+  const pagedLeagues = useMemo(() => {
+    const start = (leaguePage - 1) * PAGE_SIZE
+    return filteredLeagues.slice(start, start + PAGE_SIZE)
+  }, [filteredLeagues, leaguePage])
+
+  const allTeamsOnPageSelected = pagedTeams.length > 0 && pagedTeams.every((t) => selectedTeamIds.has(t.id))
+  const allLeaguesOnPageSelected = pagedLeagues.length > 0 && pagedLeagues.every((l) => selectedLeagueIds.has(l.id))
+
+  async function handleSync() {
+    setSyncStatus('同步中...')
+    try {
+      const result = await syncDictFromEvents()
+      setSyncStatus(result.message)
+      await loadData()
+    } catch (err) {
+      setSyncStatus(`同步失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  async function handleApplyTranslations() {
+    setSyncStatus('应用翻译中...')
+    try {
+      const result = await applyDictionaryToEvents()
+      setSyncStatus(result.message)
+      await loadData()
+    } catch (err) {
+      setSyncStatus(`应用失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  async function handleDeduplicate() {
+    setSyncStatus('去重中...')
+    try {
+      const result = await deduplicateTeams()
+      setSyncStatus(result.message)
+      await loadData()
+    } catch (err) {
+      setSyncStatus(`去重失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -80,39 +213,54 @@ export default function TranslationsPage() {
     URL.revokeObjectURL(url)
   }
 
-  async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return true
-    } catch {
-      return false
+  function getExportData(scope: 'all' | 'selected'): unknown[] {
+    if (activeTab === 'teams') {
+      const source = scope === 'selected'
+        ? filteredTeams.filter((t) => selectedTeamIds.has(t.id))
+        : filteredTeams
+      return source.map((t) => ({
+        name_en: t.name_en,
+        name_zh: t.name_zh || '',
+        league: t.league || '',
+      }))
+    } else {
+      const source = scope === 'selected'
+        ? filteredLeagues.filter((l) => selectedLeagueIds.has(l.id))
+        : filteredLeagues
+      return source.map((l) => ({
+        name_en: l.name_en,
+        name_zh: l.name_zh || '',
+      }))
     }
   }
 
-  function handleExport() {
-    const json = JSON.stringify(exportPayload, null, 2)
-    if (json === '[]') {
-      setExportStatus('当前范围没有可导出的数据')
+  function handleExport(scope: 'all' | 'selected') {
+    const data = getExportData(scope)
+    if (!data.length) {
+      setExportStatus('没有可导出的数据')
       return
     }
-    const scopeLabel = exportScope === 'untranslated' ? 'untranslated' : 'all'
-    const filename = `soccer-${scopeLabel}-${new Date().toISOString().slice(0, 10)}.json`
+    const json = JSON.stringify(data, null, 2)
+    const scopeLabel = scope === 'selected' ? 'selected' : 'all'
+    const filename = `dict-${activeTab}-${scopeLabel}-${new Date().toISOString().slice(0, 10)}.json`
     downloadJson(filename, json)
-    setExportStatus(`已导出 ${filename}`)
+    setExportStatus(`已导出 ${data.length} 条`)
   }
 
-  async function handleCopyExport() {
-    const json = JSON.stringify(exportPayload, null, 2)
-    if (json === '[]') {
-      setExportStatus('当前范围没有可导出的数据')
+  async function handleCopy(scope: 'all' | 'selected') {
+    const data = getExportData(scope)
+    if (!data.length) {
+      setExportStatus('没有可复制的数据')
       return
     }
+    const json = JSON.stringify(data, null, 2)
     const ok = await copyText(json)
-    setExportStatus(ok ? '已复制到剪贴板' : '复制失败')
+    setExportStatus(ok ? `已复制 ${data.length} 条到剪贴板` : '复制失败')
   }
 
   async function handleCopyTemplate() {
-    const ok = await copyText(JSON.stringify(FORMAT_TEMPLATE, null, 2))
+    const template = activeTab === 'teams' ? TEAM_EXPORT_TEMPLATE : LEAGUE_EXPORT_TEMPLATE
+    const ok = await copyText(JSON.stringify(template, null, 2))
     alert(ok ? '模板已复制' : '复制失败')
   }
 
@@ -127,37 +275,12 @@ export default function TranslationsPage() {
     }
     if (!Array.isArray(parsed)) return { valid: false, error: '顶层必须是数组' }
     for (let i = 0; i < parsed.length; i++) {
-      const item = parsed[i] as { id?: unknown; markets?: unknown[] }
-      if (!item || typeof item.id !== 'string' || !item.id) {
-        return { valid: false, error: `第 ${i + 1} 条缺少有效 id` }
-      }
-      if (item.markets) {
-        if (!Array.isArray(item.markets)) {
-          return { valid: false, error: `第 ${i + 1} 条的 markets 必须是数组` }
-        }
-        for (let j = 0; j < item.markets.length; j++) {
-          const m = item.markets[j] as { id?: unknown }
-          if (!m || typeof m.id !== 'string' || !m.id) {
-            return { valid: false, error: `第 ${i + 1} 条第 ${j + 1} 个盘口缺少有效 id` }
-          }
-        }
+      const item = parsed[i] as { name_en?: unknown }
+      if (!item || typeof item.name_en !== 'string' || !item.name_en) {
+        return { valid: false, error: `第 ${i + 1} 条缺少有效 name_en` }
       }
     }
     return { valid: true, parsed }
-  }
-
-  function handleValidate() {
-    const raw = importJson.trim()
-    if (!raw) {
-      setImportStatus('请先粘贴 JSON')
-      return
-    }
-    const result = validateImportPayload(raw)
-    if (result.valid) {
-      setImportStatus(`格式正确，共 ${result.parsed.length} 条比赛`)
-    } else {
-      setImportStatus(result.error)
-    }
   }
 
   async function handleImport() {
@@ -173,8 +296,11 @@ export default function TranslationsPage() {
     }
     setImportStatus('导入中...')
     try {
-      const message = await importTranslations(result.parsed)
-      setImportStatus(message)
+      const payload = activeTab === 'teams'
+        ? { teams: result.parsed as Array<{ name_en: string; name_zh?: string; league?: string }> }
+        : { leagues: result.parsed as Array<{ name_en: string; name_zh?: string }> }
+      const res = await importDict(payload)
+      setImportStatus(res.message)
       setImportJson('')
       await loadData()
     } catch (err) {
@@ -182,14 +308,129 @@ export default function TranslationsPage() {
     }
   }
 
+  async function handleAddTeam() {
+    const nameEn = prompt('请输入球队英文名：')
+    if (!nameEn?.trim()) return
+    const nameZh = prompt('请输入球队中文名（可选）：') || null
+    const league = prompt('请输入所属联赛（可选）：') || null
+    try {
+      await saveDictTeam({ name_en: nameEn.trim(), name_zh: nameZh, league })
+      await loadData()
+      alert('添加成功')
+    } catch (err) {
+      alert(`添加失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  async function handleAddLeague() {
+    const nameEn = prompt('请输入联赛英文名：')
+    if (!nameEn?.trim()) return
+    const nameZh = prompt('请输入联赛中文名（可选）：') || null
+    try {
+      await saveDictLeague({ name_en: nameEn.trim(), name_zh: nameZh })
+      await loadData()
+      alert('添加成功')
+    } catch (err) {
+      alert(`添加失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  function toggleTeamSelect(id: number) {
+    setSelectedTeamIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleLeagueSelect(id: number) {
+    setSelectedLeagueIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAllTeams() {
+    if (allTeamsOnPageSelected) {
+      setSelectedTeamIds((prev) => {
+        const next = new Set(prev)
+        pagedTeams.forEach((t) => next.delete(t.id))
+        return next
+      })
+    } else {
+      setSelectedTeamIds((prev) => {
+        const next = new Set(prev)
+        pagedTeams.forEach((t) => next.add(t.id))
+        return next
+      })
+    }
+  }
+
+  function toggleSelectAllLeagues() {
+    if (allLeaguesOnPageSelected) {
+      setSelectedLeagueIds((prev) => {
+        const next = new Set(prev)
+        pagedLeagues.forEach((l) => next.delete(l.id))
+        return next
+      })
+    } else {
+      setSelectedLeagueIds((prev) => {
+        const next = new Set(prev)
+        pagedLeagues.forEach((l) => next.add(l.id))
+        return next
+      })
+    }
+  }
+
+  async function handleBatchDeleteTeams() {
+    if (!selectedTeamIds.size) return
+    if (!confirm(`确定删除选中的 ${selectedTeamIds.size} 支球队吗？`)) return
+    let success = 0
+    let failed = 0
+    for (const id of selectedTeamIds) {
+      try {
+        await deleteDictTeam(id)
+        success++
+      } catch {
+        failed++
+      }
+    }
+    setSelectedTeamIds(new Set())
+    await loadData()
+    alert(`删除完成：成功 ${success} 条，失败 ${failed} 条`)
+  }
+
+  async function handleBatchDeleteLeagues() {
+    if (!selectedLeagueIds.size) return
+    if (!confirm(`确定删除选中的 ${selectedLeagueIds.size} 个联赛吗？`)) return
+    let success = 0
+    let failed = 0
+    for (const id of selectedLeagueIds) {
+      try {
+        await deleteDictLeague(id)
+        success++
+      } catch {
+        failed++
+      }
+    }
+    setSelectedLeagueIds(new Set())
+    await loadData()
+    alert(`删除完成：成功 ${success} 条，失败 ${failed} 条`)
+  }
+
+  const selectedTeamCount = selectedTeamIds.size
+  const selectedLeagueCount = selectedLeagueIds.size
+
   return (
     <Layout
-      title="比赛信息翻译"
-      subtitle="导出、AI 翻译、批量导入足球赛事中文信息"
+      title="翻译词典管理"
+      subtitle="以球队和联赛为单位管理翻译，一次翻译自动应用到所有比赛"
       actions={
         <button
           type="button"
-          data-dom-id="btn-load"
           disabled={loading}
           onClick={loadData}
           className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80 disabled:opacity-60"
@@ -200,375 +441,668 @@ export default function TranslationsPage() {
       }
     >
       <div className="mx-auto max-w-7xl space-y-4">
-        <div className="grid gap-3 sm:grid-cols-3">
-          <StatCard
-            icon={Database}
-            label="数据库中的比赛"
-            value={`${events.length} 条`}
-            color="primary"
-          />
-          <StatCard
-            icon={FileText}
-            label="待翻译比赛"
-            value={`${untranslatedEvents.length} 条`}
-            color="warning"
-          />
-          <StatCard
-            icon={CheckCircle2}
-            label="已翻译比赛"
-            value={`${translatedCount} 条`}
-            color="success"
-          />
+        {/* Stats */}
+        <div className="grid gap-3 sm:grid-cols-4">
+          <StatCard icon={Users} label="球队总数" value={`${stats?.teams.total ?? 0} 支`} color="primary" />
+          <StatCard icon={CheckCircle2} label="已翻译球队" value={`${stats?.teams.translated ?? 0} 支`} color="success" />
+          <StatCard icon={Trophy} label="联赛总数" value={`${stats?.leagues.total ?? 0} 个`} color="primary" />
+          <StatCard icon={CheckCircle2} label="已翻译联赛" value={`${stats?.leagues.translated ?? 0} 个`} color="success" />
         </div>
 
+        {/* Dictionary actions */}
+        <div className="flex items-center justify-between rounded-lg border border-border bg-card p-3">
+          <div className="flex items-center gap-2">
+            <Database className="h-4 w-4 text-primary" />
+            <span className="text-xs text-foreground">
+              根据词典翻译已有比赛的球队名称
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {syncStatus && (
+              <span className="text-xs text-muted-foreground">{syncStatus}</span>
+            )}
+            <button
+              type="button"
+              onClick={handleApplyTranslations}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              应用词典翻译
+            </button>
+            <button
+              type="button"
+              onClick={handleSync}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted/50"
+            >
+              <Database className="h-3.5 w-3.5" />
+              提取球队
+            </button>
+            <button
+              type="button"
+              onClick={handleDeduplicate}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted/50"
+            >
+              <Users className="h-3.5 w-3.5" />
+              球队去重
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-1 rounded-lg border border-border bg-muted/30 p-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab('teams')}
+            className={cn(
+              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors',
+              activeTab === 'teams'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            <Users className="h-3.5 w-3.5" />
+            球队词典
+            {stats && (
+              <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                {stats.teams.untranslated} 未译
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('leagues')}
+            className={cn(
+              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors',
+              activeTab === 'leagues'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            <Trophy className="h-3.5 w-3.5" />
+            联赛词典
+            {stats && (
+              <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+                {stats.leagues.untranslated} 未译
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={`搜索${activeTab === 'teams' ? '球队' : '联赛'}英文名/中文名...`}
+              className="h-8 w-full rounded-md border border-border bg-input pl-8 pr-3 text-xs text-foreground outline-none focus:border-primary"
+            />
+          </div>
+          {activeTab === 'teams' && (
+            <div className="flex items-center gap-1.5">
+              <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+              <select
+                value={leagueFilter}
+                onChange={(e) => setLeagueFilter(e.target.value)}
+                className="h-8 rounded-md border border-border bg-input px-2 text-xs text-foreground outline-none focus:border-primary"
+              >
+                <option value="">全部联赛</option>
+                {uniqueLeagues.map((l) => (
+                  <option key={l} value={l}>{l}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={filterUntranslated}
+              onChange={(e) => setFilterUntranslated(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-border accent-primary"
+            />
+            仅显示未翻译
+          </label>
+          <div className="ml-auto flex items-center gap-2">
+            <div className="relative group">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+              >
+                <Download className="h-3.5 w-3.5" />
+                导出
+                <ChevronRight className="h-3 w-3 rotate-90" />
+              </button>
+              <div className="absolute right-0 top-full z-10 mt-1 hidden w-40 rounded-md border border-border bg-background p-1 shadow-lg group-hover:block">
+                <button
+                  type="button"
+                  onClick={() => handleExport('all')}
+                  className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted"
+                >
+                  <Download className="h-3 w-3" />
+                  导出全部
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExport('selected')}
+                  disabled={activeTab === 'teams' ? !selectedTeamCount : !selectedLeagueCount}
+                  className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <CheckSquare className="h-3 w-3" />
+                  导出选中
+                </button>
+              </div>
+            </div>
+            <div className="relative group">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                复制
+                <ChevronRight className="h-3 w-3 rotate-90" />
+              </button>
+              <div className="absolute right-0 top-full z-10 mt-1 hidden w-40 rounded-md border border-border bg-background p-1 shadow-lg group-hover:block">
+                <button
+                  type="button"
+                  onClick={() => handleCopy('all')}
+                  className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted"
+                >
+                  <Copy className="h-3 w-3" />
+                  复制全部
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCopy('selected')}
+                  disabled={activeTab === 'teams' ? !selectedTeamCount : !selectedLeagueCount}
+                  className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <CheckSquare className="h-3 w-3" />
+                  复制选中
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={activeTab === 'teams' ? handleAddTeam : handleAddLeague}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              新增
+            </button>
+          </div>
+        </div>
+
+        {exportStatus && (
+          <div className="text-xs text-muted-foreground">{exportStatus}</div>
+        )}
+
+        {/* Batch actions bar */}
+        {(activeTab === 'teams' ? selectedTeamCount : selectedLeagueCount) > 0 && (
+          <div className="flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+            <span className="text-xs text-foreground">
+              已选择 <strong className="text-primary">{activeTab === 'teams' ? selectedTeamCount : selectedLeagueCount}</strong> 项
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeTab === 'teams') setSelectedTeamIds(new Set())
+                  else setSelectedLeagueIds(new Set())
+                }}
+                className="text-xs text-muted-foreground hover:text-foreground"
+              >
+                取消选择
+              </button>
+              <button
+                type="button"
+                onClick={() => handleCopy(activeTab === 'teams' ? 'selected' : 'selected')}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[10px] font-medium text-foreground hover:bg-muted"
+              >
+                <Copy className="h-3 w-3" />
+                复制选中
+              </button>
+              <button
+                type="button"
+                onClick={() => handleExport('selected')}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[10px] font-medium text-foreground hover:bg-muted"
+              >
+                <Download className="h-3 w-3" />
+                导出选中
+              </button>
+              <button
+                type="button"
+                onClick={activeTab === 'teams' ? handleBatchDeleteTeams : handleBatchDeleteLeagues}
+                className="inline-flex items-center gap-1 rounded-md bg-error/90 px-2 py-1 text-[10px] font-medium text-white hover:bg-error"
+              >
+                <Trash2 className="h-3 w-3" />
+                批量删除
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Table */}
+        {activeTab === 'teams' ? (
+          <>
+            <TeamsTable
+              teams={pagedTeams}
+              selectedIds={selectedTeamIds}
+              allSelected={allTeamsOnPageSelected}
+              onToggleSelect={toggleTeamSelect}
+              onToggleSelectAll={toggleSelectAllTeams}
+              onChanged={loadData}
+            />
+            <Pagination
+              currentPage={teamPage}
+              totalPages={teamTotalPages}
+              totalItems={filteredTeams.length}
+              pageSize={PAGE_SIZE}
+              onChange={setTeamPage}
+            />
+          </>
+        ) : (
+          <>
+            <LeaguesTable
+              leagues={pagedLeagues}
+              selectedIds={selectedLeagueIds}
+              allSelected={allLeaguesOnPageSelected}
+              onToggleSelect={toggleLeagueSelect}
+              onToggleSelectAll={toggleSelectAllLeagues}
+              onChanged={loadData}
+            />
+            <Pagination
+              currentPage={leaguePage}
+              totalPages={leagueTotalPages}
+              totalItems={filteredLeagues.length}
+              pageSize={PAGE_SIZE}
+              onChange={setLeaguePage}
+            />
+          </>
+        )}
+
+        {/* Batch import */}
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="mb-3 flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-primary" />
-            <h2 className="text-sm font-semibold text-foreground">AI 批量翻译工作流</h2>
+            <BookOpen className="h-4 w-4 text-primary" />
+            <h2 className="text-sm font-semibold text-foreground">
+              批量导入{activeTab === 'teams' ? '球队' : '联赛'}翻译
+            </h2>
           </div>
-          <div className="relative space-y-4">
-            <Step number={1} title="导出待翻译数据" last={false}>
-              <p className="mb-2 text-xs text-muted-foreground">
-                只导出比赛基础信息（不含盘口），减小 AI 输入量。
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={exportScope}
-                  onChange={(e) => {
-                    setExportScope(e.target.value as 'all' | 'untranslated')
-                    setExportStatus(
-                      `当前可导出 ${(e.target.value === 'all' ? events : untranslatedEvents).length} 条`,
-                    )
-                  }}
-                  className="rounded-md border border-border bg-input px-2 py-1.5 text-xs text-foreground outline-none focus:border-primary"
-                >
-                  <option value="all">导出全部比赛</option>
-                  <option value="untranslated">仅导出未翻译</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={handleExport}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 active:opacity-80"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  导出 JSON
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCopyExport}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                  复制到剪贴板
-                </button>
-                <span className="text-xs text-muted-foreground">{exportStatus}</span>
-              </div>
-            </Step>
-
-            <Step number={2} title="获取格式模板" last={false}>
-              <p className="mb-2 text-xs text-muted-foreground">
-                将导出的 JSON 与下方格式模板一起发给 AI，要求 AI 返回固定格式的翻译结果。
-              </p>
-              <details className="group rounded-md border border-border bg-background">
-                <summary className="flex cursor-pointer items-center justify-between px-3 py-2 text-xs font-medium text-foreground">
-                  <span className="inline-flex items-center gap-1.5">
-                    <Code className="h-3.5 w-3.5" />
-                    查看格式模板
-                  </span>
-                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
-                </summary>
-                <div className="border-t border-border p-3">
-                  <pre className="max-h-64 overflow-auto rounded bg-background p-2 text-[11px] leading-relaxed text-foreground/90">
-                    {JSON.stringify(FORMAT_TEMPLATE, null, 2)}
-                  </pre>
-                  <button
-                    type="button"
-                    onClick={handleCopyTemplate}
-                    className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[10px] font-medium text-foreground hover:bg-muted"
-                  >
-                    <Copy className="h-3 w-3" />
-                    复制模板
-                  </button>
-                </div>
-              </details>
-            </Step>
-
-            <Step number={3} title="粘贴翻译结果并导入" last={true}>
-              <p className="mb-2 text-xs text-muted-foreground">
-                将 AI 返回的固定格式 JSON 粘贴到下方，点击“批量导入”写入数据库。
-              </p>
-              <textarea
-                value={importJson}
-                onChange={(e) => setImportJson(e.target.value)}
-                rows={8}
-                className="w-full rounded-md border border-border bg-input px-3 py-2 text-xs text-foreground outline-none focus:border-primary"
-                placeholder={`[{"id":"...","title_zh":"...","home_team_zh":"...","away_team_zh":"...","league":"..."}]`}
-              />
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleImport}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 active:opacity-80"
-                >
-                  <Upload className="h-3.5 w-3.5" />
-                  批量导入
-                </button>
-                <button
-                  type="button"
-                  onClick={handleValidate}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
-                >
-                  <CheckCircle className="h-3.5 w-3.5" />
-                  校验格式
-                </button>
-                <span
-                  className={cn(
-                    'text-xs',
-                    importStatus.startsWith('导入成功') || importStatus.startsWith('格式正确')
-                      ? 'text-success'
-                      : importStatus.startsWith('失败') ||
-                          importStatus.startsWith('格式错误') ||
-                          importStatus.startsWith('导入失败')
-                        ? 'text-error'
-                        : 'text-muted-foreground',
-                  )}
-                >
-                  {importStatus}
-                </span>
-              </div>
-            </Step>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <div className="flex items-center justify-between border-b border-border px-3 py-2">
-            <h3 className="text-sm font-semibold text-foreground">手动编辑</h3>
-            <span className="text-xs text-muted-foreground">可直接修改单条比赛/盘口并保存</span>
-          </div>
-          <table className="w-full text-left text-xs">
-            <thead className="bg-muted/50 text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2">状态</th>
-                <th className="px-3 py-2">英文标题</th>
-                <th className="px-3 py-2 min-w-[160px]">中文标题</th>
-                <th className="px-3 py-2">主队中文</th>
-                <th className="px-3 py-2">客队中文</th>
-                <th className="px-3 py-2">联赛</th>
-                <th className="px-3 py-2">开赛时间</th>
-                <th className="px-3 py-2">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {!events.length ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
-                    暂无数据，请先在赛事页点击“刷新比赛”拉取数据
-                  </td>
-                </tr>
-              ) : (
-                events.map((evt) => <EventRow key={evt.id} event={evt} onSaved={loadData} />)
+          <p className="mb-2 text-xs text-muted-foreground">
+            将翻译结果按 JSON 格式粘贴到下方，点击导入。导入后相同{activeTab === 'teams' ? '球队' : '联赛'}自动翻译，无需重复操作。
+          </p>
+          <textarea
+            value={importJson}
+            onChange={(e) => setImportJson(e.target.value)}
+            rows={5}
+            className="w-full rounded-md border border-border bg-input px-3 py-2 text-xs text-foreground outline-none focus:border-primary font-mono"
+            placeholder={activeTab === 'teams'
+              ? '[{"name_en":"Manchester City","name_zh":"曼城","league":"English Premier League"}]'
+              : '[{"name_en":"English Premier League","name_zh":"英格兰足球超级联赛"}]'
+            }
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleImport}
+              className="inline-flex items-center gap-1.5 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              批量导入
+            </button>
+            <button
+              type="button"
+              onClick={handleCopyTemplate}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+            >
+              <Copy className="h-3.5 w-3.5" />
+              复制模板
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const result = validateImportPayload(importJson.trim())
+                setImportStatus(result.valid ? `格式正确，共 ${result.parsed.length} 条` : result.error)
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+            >
+              <CheckCircle className="h-3.5 w-3.5" />
+              校验格式
+            </button>
+            <span
+              className={cn(
+                'text-xs',
+                importStatus.includes('成功') || importStatus.includes('格式正确') || importStatus.includes('完成')
+                  ? 'text-success'
+                  : importStatus.includes('失败') || importStatus.includes('错误')
+                    ? 'text-error'
+                    : 'text-muted-foreground',
               )}
-            </tbody>
-          </table>
+            >
+              {importStatus}
+            </span>
+          </div>
         </div>
       </div>
     </Layout>
   )
 }
 
-function EventRow({ event, onSaved }: { event: SoccerEvent; onSaved: () => void }) {
-  const [open, setOpen] = useState(false)
-  const [markets, setMarkets] = useState<SoccerMarket[]>([])
-  const [marketsLoading, setMarketsLoading] = useState(false)
-
-  async function handleSave(row: HTMLTableRowElement) {
-    const fields: Record<string, string | null> = {}
-    row.querySelectorAll<HTMLInputElement>('input[data-field]').forEach((input) => {
-      fields[input.dataset.field!] = input.value.trim() || null
-    })
+function TeamsTable({
+  teams,
+  selectedIds,
+  allSelected,
+  onToggleSelect,
+  onToggleSelectAll,
+  onChanged,
+}: {
+  teams: DictTeam[]
+  selectedIds: Set<number>
+  allSelected: boolean
+  onToggleSelect: (id: number) => void
+  onToggleSelectAll: () => void
+  onChanged: () => void
+}) {
+  async function handleSave(id: number, row: HTMLTableRowElement) {
+    const nameZhInput = row.querySelector<HTMLInputElement>('input[data-field="name_zh"]')
+    const leagueInput = row.querySelector<HTMLInputElement>('input[data-field="league"]')
     try {
-      await saveEventTranslation({
-        id: event.id,
-        title_zh: fields.title_zh,
-        home_team_zh: fields.home_team_zh,
-        away_team_zh: fields.away_team_zh,
-        league: fields.league,
+      await updateDictTeam(id, {
+        name_zh: nameZhInput?.value ?? undefined,
+        league: leagueInput?.value ?? undefined,
       })
-      alert('保存成功')
-      onSaved()
+      onChanged()
     } catch (err) {
       alert(`保存失败：${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
-  async function toggleMarkets() {
-    const next = !open
-    setOpen(next)
-    if (next && !markets.length && !marketsLoading) {
-      setMarketsLoading(true)
-      try {
-        const res = await fetch(`/api/soccer/events/${encodeURIComponent(event.id)}/markets`)
-        const data = (await res.json()) as { success: boolean; markets?: SoccerMarket[]; error?: string }
-        if (data.success) setMarkets(data.markets || [])
-        else throw new Error(data.error || '加载失败')
-      } catch (err) {
-        alert(`加载失败：${err instanceof Error ? err.message : String(err)}`)
-      } finally {
-        setMarketsLoading(false)
-      }
-    }
-  }
-
-  const status = statusInfo(event.match_status || 'not_started')
-
-  return (
-    <>
-      <tr className="border-b border-border hover:bg-white/[0.03]">
-        <td className="px-3 py-2 align-top">
-          <span
-            className={cn(
-              'inline-flex rounded border px-1.5 py-0.5 text-[10px] font-medium',
-              status.className,
-            )}
-          >
-            {status.label}
-          </span>
-        </td>
-        <td className="px-3 py-2 align-top text-muted-foreground">
-          <span dangerouslySetInnerHTML={{ __html: escapeHtml(event.title_en) }} />
-        </td>
-        <td className="px-3 py-2 align-top">
-          <EventInput defaultValue={event.title_zh || ''} field="title_zh" />
-        </td>
-        <td className="px-3 py-2 align-top">
-          <EventInput defaultValue={event.home_team_zh || ''} field="home_team_zh" />
-        </td>
-        <td className="px-3 py-2 align-top">
-          <EventInput defaultValue={event.away_team_zh || ''} field="away_team_zh" />
-        </td>
-        <td className="px-3 py-2 align-top">
-          <EventInput defaultValue={event.league || ''} field="league" />
-        </td>
-        <td className="whitespace-nowrap px-3 py-2 align-top text-muted-foreground">
-          {formatTime(event.end_time)}
-        </td>
-        <td className="px-3 py-2 align-top">
-          <div className="flex flex-col gap-1.5">
-            <SaveButton onClick={(e) => handleSave((e.currentTarget.closest('tr') as HTMLTableRowElement))} />
-            <button
-              type="button"
-              onClick={toggleMarkets}
-              className="inline-flex items-center justify-center gap-1 rounded border border-border bg-background px-2 py-1 text-[10px] font-medium text-foreground hover:bg-muted"
-            >
-              {open ? '收起盘口' : '编辑盘口'}
-            </button>
-          </div>
-        </td>
-      </tr>
-      {open && (
-        <tr className="bg-background/50">
-          <td colSpan={8} className="px-3 py-3">
-            {marketsLoading ? (
-              <p className="text-xs text-muted-foreground">加载中...</p>
-            ) : !markets.length ? (
-              <p className="text-xs text-muted-foreground">暂无盘口</p>
-            ) : (
-              <div className="space-y-2">
-                {markets.map((market) => (
-                  <MarketEditor key={market.id} market={market} />
-                ))}
-              </div>
-            )}
-          </td>
-        </tr>
-      )}
-    </>
-  )
-}
-
-function MarketEditor({ market }: { market: SoccerMarket }) {
-  const outcomes = Array.isArray(market.outcomes) ? market.outcomes : []
-  const [questionZh, setQuestionZh] = useState(market.question_zh || '')
-  const [outcomesZh, setOutcomesZh] = useState(outcomes.join(','))
-
-  async function handleSave() {
+  async function handleDelete(id: number, name: string) {
+    if (!confirm(`确定删除球队 "${name}" 吗？`)) return
     try {
-      await saveMarketTranslation(market.id, {
-        question_zh: questionZh.trim() || null,
-        outcomes_zh: outcomesZh
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
-      })
-      alert('保存成功')
+      await deleteDictTeam(id)
+      onChanged()
     } catch (err) {
-      alert(`保存失败：${err instanceof Error ? err.message : String(err)}`)
+      alert(`删除失败：${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
+  if (!teams.length) {
+    return (
+      <div className="rounded-lg border border-border bg-card p-8 text-center text-xs text-muted-foreground">
+        暂无数据。点击"同步比赛数据"从已有比赛中提取球队。
+      </div>
+    )
+  }
+
   return (
-    <div className="rounded border border-border bg-card p-2">
-      <div className="mb-2 grid gap-2 sm:grid-cols-2">
-        <div>
-          <p className="text-[10px] text-muted-foreground">英文问题</p>
-          <p className="text-xs text-foreground">
-            <span dangerouslySetInnerHTML={{ __html: escapeHtml(market.question_en) }} />
-          </p>
-        </div>
-        <div>
-          <p className="text-[10px] text-muted-foreground">中文问题</p>
-          <input
-            type="text"
-            value={questionZh}
-            onChange={(e) => setQuestionZh(e.target.value)}
-            className="w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary"
-          />
-        </div>
-      </div>
-      <div className="mb-2">
-        <p className="text-[10px] text-muted-foreground">选项（用英文逗号分隔）</p>
-        <input
-          type="text"
-          value={outcomesZh}
-          onChange={(e) => setOutcomesZh(e.target.value)}
-          className="w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary"
-        />
-      </div>
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={handleSave}
-          className="inline-flex items-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
-        >
-          <Save className="h-3 w-3" />
-          保存盘口
-        </button>
-      </div>
+    <div className="overflow-x-auto rounded-lg border border-border bg-card">
+      <table className="w-full text-left text-xs">
+        <thead className="bg-muted/50 text-muted-foreground">
+          <tr>
+            <th className="w-10 px-3 py-2">
+              <button
+                type="button"
+                onClick={onToggleSelectAll}
+                className="text-foreground hover:text-primary"
+                title={allSelected ? '取消全选' : '全选本页'}
+              >
+                {allSelected ? (
+                  <CheckSquare className="h-4 w-4 fill-primary text-primary" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+              </button>
+            </th>
+            <th className="w-10 px-3 py-2">#</th>
+            <th className="px-3 py-2">英文队名</th>
+            <th className="px-3 py-2 min-w-[160px]">中文队名</th>
+            <th className="px-3 py-2 min-w-[180px]">所属联赛</th>
+            <th className="w-24 px-3 py-2 text-right">操作</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {teams.map((team, idx) => (
+            <tr key={team.id} className={cn('hover:bg-white/[0.03]', selectedIds.has(team.id) && 'bg-primary/5')}>
+              <td className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => onToggleSelect(team.id)}
+                  className="text-foreground hover:text-primary"
+                >
+                  {selectedIds.has(team.id) ? (
+                    <CheckSquare className="h-4 w-4 fill-primary text-primary" />
+                  ) : (
+                    <Square className="h-4 w-4" />
+                  )}
+                </button>
+              </td>
+              <td className="px-3 py-2 text-muted-foreground">{idx + 1}</td>
+              <td className="px-3 py-2">
+                <span
+                  className="font-medium text-foreground"
+                  dangerouslySetInnerHTML={{ __html: escapeHtml(team.name_en) }}
+                />
+              </td>
+              <td className="px-3 py-2">
+                <input
+                  type="text"
+                  data-field="name_zh"
+                  defaultValue={team.name_zh || ''}
+                  placeholder="输入中文队名"
+                  className="w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary"
+                />
+              </td>
+              <td className="px-3 py-2">
+                <input
+                  type="text"
+                  data-field="league"
+                  defaultValue={team.league || ''}
+                  placeholder="所属联赛"
+                  className="w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary"
+                />
+              </td>
+              <td className="px-3 py-2 text-right">
+                <div className="flex items-center justify-end gap-1">
+                  <button
+                    type="button"
+                    onClick={(e) => handleSave(team.id, e.currentTarget.closest('tr')!)}
+                    className="inline-flex items-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
+                  >
+                    <Save className="h-3 w-3" />
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(team.id, team.name_en)}
+                    className="inline-flex items-center gap-1 rounded border border-error/30 bg-error/10 px-2 py-1 text-[10px] font-medium text-error hover:bg-error/20"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    删除
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
 
-function EventInput({ defaultValue, field }: { defaultValue: string; field: string }) {
+function LeaguesTable({
+  leagues,
+  selectedIds,
+  allSelected,
+  onToggleSelect,
+  onToggleSelectAll,
+  onChanged,
+}: {
+  leagues: DictLeague[]
+  selectedIds: Set<number>
+  allSelected: boolean
+  onToggleSelect: (id: number) => void
+  onToggleSelectAll: () => void
+  onChanged: () => void
+}) {
+  async function handleSave(id: number, row: HTMLTableRowElement) {
+    const input = row.querySelector<HTMLInputElement>('input[data-field="name_zh"]')
+    try {
+      await updateDictLeague(id, input?.value || '')
+      onChanged()
+    } catch (err) {
+      alert(`保存失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  async function handleDelete(id: number, name: string) {
+    if (!confirm(`确定删除联赛 "${name}" 吗？`)) return
+    try {
+      await deleteDictLeague(id)
+      onChanged()
+    } catch (err) {
+      alert(`删除失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  if (!leagues.length) {
+    return (
+      <div className="rounded-lg border border-border bg-card p-8 text-center text-xs text-muted-foreground">
+        暂无数据。点击"同步比赛数据"从已有比赛中提取联赛。
+      </div>
+    )
+  }
+
   return (
-    <input
-      type="text"
-      data-field={field}
-      defaultValue={defaultValue}
-      className="w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary"
-    />
+    <div className="overflow-x-auto rounded-lg border border-border bg-card">
+      <table className="w-full text-left text-xs">
+        <thead className="bg-muted/50 text-muted-foreground">
+          <tr>
+            <th className="w-10 px-3 py-2">
+              <button
+                type="button"
+                onClick={onToggleSelectAll}
+                className="text-foreground hover:text-primary"
+                title={allSelected ? '取消全选' : '全选本页'}
+              >
+                {allSelected ? (
+                  <CheckSquare className="h-4 w-4 fill-primary text-primary" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+              </button>
+            </th>
+            <th className="w-10 px-3 py-2">#</th>
+            <th className="px-3 py-2">英文联赛名</th>
+            <th className="px-3 py-2 min-w-[200px]">中文联赛名</th>
+            <th className="w-24 px-3 py-2 text-right">操作</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {leagues.map((league, idx) => (
+            <tr key={league.id} className={cn('hover:bg-white/[0.03]', selectedIds.has(league.id) && 'bg-primary/5')}>
+              <td className="px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => onToggleSelect(league.id)}
+                  className="text-foreground hover:text-primary"
+                >
+                  {selectedIds.has(league.id) ? (
+                    <CheckSquare className="h-4 w-4 fill-primary text-primary" />
+                  ) : (
+                    <Square className="h-4 w-4" />
+                  )}
+                </button>
+              </td>
+              <td className="px-3 py-2 text-muted-foreground">{idx + 1}</td>
+              <td className="px-3 py-2">
+                <span
+                  className="font-medium text-foreground"
+                  dangerouslySetInnerHTML={{ __html: escapeHtml(league.name_en) }}
+                />
+              </td>
+              <td className="px-3 py-2">
+                <input
+                  type="text"
+                  data-field="name_zh"
+                  defaultValue={league.name_zh || ''}
+                  placeholder="输入中文联赛名"
+                  className="w-full rounded border border-border bg-input px-2 py-1 text-xs text-foreground outline-none focus:border-primary"
+                />
+              </td>
+              <td className="px-3 py-2 text-right">
+                <div className="flex items-center justify-end gap-1">
+                  <button
+                    type="button"
+                    onClick={(e) => handleSave(league.id, e.currentTarget.closest('tr')!)}
+                    className="inline-flex items-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
+                  >
+                    <Save className="h-3 w-3" />
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(league.id, league.name_en)}
+                    className="inline-flex items-center gap-1 rounded border border-error/30 bg-error/10 px-2 py-1 text-[10px] font-medium text-error hover:bg-error/20"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    删除
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
-function SaveButton({ onClick }: { onClick: (e: React.MouseEvent<HTMLButtonElement>) => void }) {
+function Pagination({
+  currentPage,
+  totalPages,
+  totalItems,
+  pageSize,
+  onChange,
+}: {
+  currentPage: number
+  totalPages: number
+  totalItems: number
+  pageSize: number
+  onChange: (page: number) => void
+}) {
+  const start = totalItems === 0 ? 0 : (currentPage - 1) * pageSize + 1
+  const end = Math.min(currentPage * pageSize, totalItems)
+
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex items-center justify-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
-    >
-      <Save className="h-3 w-3" />
-      保存
-    </button>
+    <div className="flex items-center justify-between px-1">
+      <span className="text-xs text-muted-foreground">
+        显示 {start}-{end} / 共 {totalItems} 条
+      </span>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onChange(Math.max(1, currentPage - 1))}
+          disabled={currentPage === 1}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <span className="min-w-[60px] text-center text-xs text-foreground">
+          {currentPage} / {totalPages}
+        </span>
+        <button
+          type="button"
+          onClick={() => onChange(Math.min(totalPages, currentPage + 1))}
+          disabled={currentPage === totalPages}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -607,64 +1141,4 @@ function StatCard({
       </div>
     </div>
   )
-}
-
-function Step({
-  number,
-  title,
-  children,
-  last,
-}: {
-  number: number
-  title: string
-  children: React.ReactNode
-  last: boolean
-}) {
-  return (
-    <div className="relative pl-8">
-      {!last && (
-        <div className="absolute bottom-[-16px] left-[15px] top-[32px] w-0.5 bg-border" />
-      )}
-      <div className="absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
-        {number}
-      </div>
-      <div>
-        <p className="text-sm font-medium text-foreground">{title}</p>
-        {children}
-      </div>
-    </div>
-  )
-}
-
-function statusInfo(status: string) {
-  const map: Record<string, { label: string; className: string }> = {
-    not_started: {
-      label: '未开始',
-      className: 'bg-warning/15 text-warning border-warning/30',
-    },
-    live: {
-      label: '进行中',
-      className: 'bg-success/15 text-success border-success/30',
-    },
-    ended: {
-      label: '已结束',
-      className: 'bg-muted text-muted-foreground border-border',
-    },
-  }
-  return map[status] || map.not_started
-}
-
-function buildExportItem(evt: SoccerEvent) {
-  return {
-    id: evt.id,
-    title_en: evt.title_en || '',
-    title_zh: evt.title_zh || '',
-    home_team_en: evt.home_team_en || '',
-    home_team_zh: evt.home_team_zh || '',
-    away_team_en: evt.away_team_en || '',
-    away_team_zh: evt.away_team_zh || '',
-    league: evt.league || '',
-    league_zh: evt.league || '',
-    end_time: evt.end_time,
-  }
 }

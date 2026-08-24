@@ -1,7 +1,8 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Activity, LayoutDashboard, Trophy, Languages, Moon, Sun } from 'lucide-react'
+import { Activity, LayoutDashboard, Trophy, Languages, Moon, Sun, Wallet } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDarkMode } from '@/components/theme-provider'
+import { WalletBalance } from '@/components/wallet-balance'
 
 interface LayoutProps {
   title: string
@@ -18,6 +19,7 @@ export function Layout({ title, subtitle, children, actions }: LayoutProps) {
     { to: '/', label: '主控台', icon: LayoutDashboard },
     { to: '/soccer', label: '足球赛事', icon: Trophy },
     { to: '/translations', label: '翻译', icon: Languages },
+    { to: '/wallet', label: '钱包', icon: Wallet },
   ]
 
   return (
@@ -36,6 +38,7 @@ export function Layout({ title, subtitle, children, actions }: LayoutProps) {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-3">
+            <WalletBalance />
             <nav className="hidden items-center gap-2 sm:flex">
               {nav.map((item) => {
                 const active = location.pathname === item.to

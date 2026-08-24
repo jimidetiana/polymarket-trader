@@ -1,21 +1,26 @@
-import axios, { type AxiosInstance } from 'axios';
+import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   dbConfig,
   pool,
   upsertEvent,
   upsertMarket,
-  getTeamTranslationMap,
   deleteDerivativeEvents,
   deleteClosedEvents,
   type SoccerMarketRow,
 } from './db.js';
+import {
+  getTeamTranslationMap,
+  getLeagueTranslationMap,
+  upsertTeam,
+  upsertLeague,
+} from './dict.js';
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 
 function createGammaClient(): AxiosInstance {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-  const config: axios.AxiosRequestConfig = {
+  const config: AxiosRequestConfig = {
     baseURL: GAMMA_BASE,
     timeout: 60000,
   };
@@ -69,7 +74,7 @@ interface GammaEvent {
   tags?: Array<{ slug?: string; label?: string }>;
 }
 
-const TEAM_NAME_MAP: Record<string, string> = {
+export const TEAM_NAME_MAP: Record<string, string> = {
   'Shanghai Haigang FC': '上海海港',
   'Shanghai Shenhua FC': '上海申花',
   'Shanghai Port FC': '上海海港',
@@ -141,7 +146,7 @@ function classifyMarketType(questionEn: string): string {
   return 'other';
 }
 
-function translateTeamName(en: string, map: Record<string, string>): string {
+export function translateTeamName(en: string, map: Record<string, string>): string {
   // try exact match, then case-insensitive, then remove trailing "FC"
   if (map[en]) return map[en];
   const key = Object.keys(map).find(
@@ -153,7 +158,7 @@ function translateTeamName(en: string, map: Record<string, string>): string {
   return en;
 }
 
-function translateText(en: string, homeEn: string, awayEn: string, homeZh: string, awayZh: string): string {
+export function translateText(en: string, homeEn: string, awayEn: string, homeZh: string, awayZh: string): string {
   let text = en;
   // replace longer names first to avoid partial replacement
   const pairs = [
@@ -241,7 +246,10 @@ function toDateTime(iso: string | undefined): string | null {
 
 export async function fetchTodaysSoccerEvents(): Promise<{ events: number }> {
   const client = createGammaClient();
-  const dbTeamMap = await getTeamTranslationMap();
+  const [dbTeamMap, dbLeagueMap] = await Promise.all([
+    getTeamTranslationMap(),
+    getLeagueTranslationMap(),
+  ]);
   const combinedTeamMap = { ...TEAM_NAME_MAP, ...dbTeamMap };
 
   // Clean up derivative events previously inserted by older versions.
@@ -354,7 +362,19 @@ export async function fetchTodaysSoccerEvents(): Promise<{ events: number }> {
     const homeZh = translateTeamName(homeEn, combinedTeamMap);
     const awayZh = translateTeamName(awayEn, combinedTeamMap);
     const titleZh = teams ? `${homeZh} vs ${awayZh}` : event.title;
-    const league = event.tags?.find((t) => t.slug?.includes('league'))?.label ?? '足球';
+    const leagueEn = event.tags?.find((t) => t.slug?.includes('league'))?.label ?? '足球';
+    const league = dbLeagueMap[leagueEn] || leagueEn;
+
+    // Auto-sync teams and leagues to dictionary
+    if (homeEn) {
+      await upsertTeam(homeEn, homeZh !== homeEn ? homeZh : null, leagueEn);
+    }
+    if (awayEn) {
+      await upsertTeam(awayEn, awayZh !== awayEn ? awayZh : null, leagueEn);
+    }
+    if (leagueEn && leagueEn !== '足球') {
+      await upsertLeague(leagueEn, league !== leagueEn ? league : null);
+    }
 
     await upsertEvent({
       id: event.id,
@@ -449,8 +469,11 @@ export async function fetchEventMarketsFromGamma(eventId: string): Promise<Socce
     const teams = parseTeams(evt.title);
     const homeEn = teams?.home ?? '';
     const awayEn = teams?.away ?? '';
-    const dbTeamMap = await getTeamTranslationMap();
-    const combinedTeamMap = { ...TEAM_NAME_MAP, ...dbTeamMap };
+    const [teamMap, leagueMap] = await Promise.all([
+      getTeamTranslationMap(),
+      getLeagueTranslationMap(),
+    ]);
+    const combinedTeamMap = { ...TEAM_NAME_MAP, ...teamMap };
     const homeZh = translateTeamName(homeEn, combinedTeamMap);
     const awayZh = translateTeamName(awayEn, combinedTeamMap);
 

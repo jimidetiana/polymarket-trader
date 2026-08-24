@@ -13,13 +13,17 @@
     "soccer:fetch": "tsx src/soccer/fetcher.ts"
   },
   "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.10",
+    "@polymarket/clob-client": "^5.8.1",
+    "@polymarkets/clob-client-v2": "^1.0.6",
     "axios": "^1.7.0",
     "decimal.js": "^10.4.3",
     "dotenv": "^16.4.0",
+    "ethers": "^5.8.0",
     "express": "^4.21.0",
     "https-proxy-agent": "^7.0.0",
     "mysql2": "^3.23.3",
-    "viem": "^2.21.0",
+    "viem": "^2.55.19",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -28,5 +32,12 @@
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
-  }
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "types": "./dist/index.d.ts"
 }

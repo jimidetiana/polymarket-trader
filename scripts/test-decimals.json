@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"0x2791Bca1f2de4661ED88A30C99A7a9c960f7F8a1","data":"0x313ce567"},"latest"],"id":1}

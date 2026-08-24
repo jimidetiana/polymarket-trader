@@ -33,6 +33,16 @@ export function formatPercent(price: number | null | undefined): string {
   return `${(price * 100).toFixed(1)}%`
 }
 
+export function formatUsdc(amount: number | string | null | undefined, decimals = 2): string {
+  if (amount === null || amount === undefined) return '0.00'
+  const num = Number(amount)
+  if (Number.isNaN(num)) return '0.00'
+  return num.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })
+}
+
 export function clamp(num: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, num))
 }

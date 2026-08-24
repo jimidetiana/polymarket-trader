@@ -5,11 +5,14 @@ import { createProxyAgent } from '../proxy.js';
 
 export class ClobClient {
   private readonly axios: AxiosInstance;
+  // POLY_ADDRESS for L2 auth: proxy wallet (sig_type=3) or EOA (sig_type=0)
+  private readonly polyAddress: string;
 
   constructor(
     baseUrl: string,
     private readonly credentials: ClobCredentials,
     private readonly signerAddress: string,
+    funderAddress?: string,
   ) {
     const agent = createProxyAgent();
     this.axios = axios.create({
@@ -18,14 +21,18 @@ export class ClobClient {
       httpsAgent: agent,
     });
 
+    // When funderAddress (proxy) is provided, L2 POLY_ADDRESS must be the proxy
+    this.polyAddress = funderAddress ?? signerAddress;
+
     this.axios.interceptors.request.use((cfg) => {
       const timestamp = Math.floor(Date.now() / 1000).toString();
+      // L2 signature covers only the bare path (no query string)
       const path = cfg.url ?? '/';
       const body = cfg.data && typeof cfg.data !== 'string' ? JSON.stringify(cfg.data) : cfg.data;
       const method = (cfg.method ?? 'GET').toUpperCase();
       const signature = createL2Signature(this.credentials.secret, timestamp, method, path, body);
 
-      cfg.headers.set('POLY_ADDRESS', this.signerAddress);
+      cfg.headers.set('POLY_ADDRESS', this.polyAddress);
       cfg.headers.set('POLY_API_KEY', this.credentials.apiKey);
       cfg.headers.set('POLY_PASSPHRASE', this.credentials.passphrase);
       cfg.headers.set('POLY_TIMESTAMP', timestamp);
@@ -81,6 +88,11 @@ export class ClobClient {
   async getTrades(params?: Record<string, unknown>): Promise<unknown> {
     const response = await this.axios.get('/data/trades', { params });
     return response.data;
+  }
+
+  async getBalanceAllowance(assetType = 'COLLATERAL'): Promise<{ balance: string; allowance: string }> {
+    const response = await this.axios.get('/balance-allowance', { params: { asset_type: assetType } });
+    return response.data as { balance: string; allowance: string };
   }
 
   async sendHeartbeat(): Promise<unknown> {

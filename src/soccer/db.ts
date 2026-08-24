@@ -298,6 +298,51 @@ export async function getOrders(): Promise<unknown[]> {
   return rows;
 }
 
+export async function getOrder(id: number): Promise<{
+  id: number;
+  market_id: string;
+  token_id: string;
+  side: 'BUY' | 'SELL';
+  size: number;
+  price: number;
+  order_status: string;
+  memo: string | null;
+  created_at: string;
+} | null> {
+  const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+    `SELECT id, market_id, token_id, side, size, price, order_status, memo, created_at
+     FROM soccer_orders WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  if (!rows.length) return null;
+  const row = rows[0];
+  return {
+    id: row.id,
+    market_id: String(row.market_id),
+    token_id: row.token_id,
+    side: row.side as 'BUY' | 'SELL',
+    size: Number(row.size),
+    price: Number(row.price),
+    order_status: row.order_status,
+    memo: row.memo,
+    created_at: row.created_at,
+  };
+}
+
+export async function updateOrderStatus(id: number, status: string, memo?: string): Promise<void> {
+  if (memo !== undefined) {
+    await pool.execute(
+      `UPDATE soccer_orders SET order_status = ?, memo = CONCAT(COALESCE(memo, ''), ' | ', ?) WHERE id = ?`,
+      [status, memo, id],
+    );
+  } else {
+    await pool.execute(
+      `UPDATE soccer_orders SET order_status = ? WHERE id = ?`,
+      [status, id],
+    );
+  }
+}
+
 export async function getTeamTranslationMap(): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   const [homeRows] = await pool.execute<mysql.RowDataPacket[]>(
