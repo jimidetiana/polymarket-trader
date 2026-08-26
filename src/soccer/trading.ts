@@ -470,12 +470,22 @@ export async function syncOrderStatus(): Promise<{
 
     // 6. 导入链上成交记录（按 taker_order_id 分组）
     const tradesByOrderId = new Map<string, any[]>();
+    const tradesByMakerOrderId = new Map<string, any[]>();
     const tradesByKey = new Map<string, any[]>();
     for (const t of allTrades) {
       const oid = t.taker_order_id || '';
       if (oid) {
         if (!tradesByOrderId.has(oid)) tradesByOrderId.set(oid, []);
         tradesByOrderId.get(oid)!.push(t);
+      }
+      // CLOB V2 返回 maker_orders 数组（每个 trade 可能匹配多个 maker 订单）
+      const makerOrders = Array.isArray(t.maker_orders) ? t.maker_orders : [];
+      for (const mo of makerOrders) {
+        const makerOid = mo?.order_id || '';
+        if (makerOid) {
+          if (!tradesByMakerOrderId.has(makerOid)) tradesByMakerOrderId.set(makerOid, []);
+          tradesByMakerOrderId.get(makerOid)!.push(t);
+        }
       }
       const key = `${t.asset_id}_${(t.side || '').toUpperCase()}_${Number(t.price).toFixed(4)}`;
       if (!tradesByKey.has(key)) tradesByKey.set(key, []);
@@ -484,6 +494,20 @@ export async function syncOrderStatus(): Promise<{
 
     for (const [oid, trades] of tradesByOrderId) {
       if (!oid || localClobIds.has(oid)) continue;
+
+      const firstTrade = trades[0];
+
+      // 如果当前用户是这笔成交的 maker，不应该把别人的 taker 订单导入成新订单。
+      // CLOB V2 用 trader_side 标识当前用户在 trade 中的角色，maker 详情在 maker_orders 数组里。
+      if (firstTrade?.trader_side === 'MAKER') continue;
+
+      // 兜底：检查 maker_orders 中是否有任一订单已在本地（防止 trader_side 缺失时误判）
+      const makerOrderIds = new Set(
+        (Array.isArray(firstTrade?.maker_orders) ? firstTrade.maker_orders : [])
+          .map((mo: any) => mo?.order_id)
+          .filter(Boolean),
+      );
+      if ([...makerOrderIds].some((id) => localClobIds.has(id))) continue;
 
       const first = trades[0];
       const tokenId = String(first.asset_id || '');
@@ -567,7 +591,12 @@ export async function syncOrderStatus(): Promise<{
           }
         } else {
           // 不在 open 列表：先查 trades（成交记录最可靠），再查 getOrder
-          const trades = tradesByOrderId.get(clobOrderId);
+          let trades = tradesByOrderId.get(clobOrderId);
+          // 如果 taker 方向没找到，试试 maker 方向（用户作为挂单方成交）
+          if (!trades || trades.length === 0) {
+            const makerTrades = tradesByMakerOrderId.get(clobOrderId);
+            if (makerTrades && makerTrades.length > 0) trades = makerTrades;
+          }
           if (trades && trades.length > 0) {
             // 有成交记录 → 根据成交量判断状态
             const totalMatched = trades.reduce((sum, t) => sum + Number(t.size || 0), 0);

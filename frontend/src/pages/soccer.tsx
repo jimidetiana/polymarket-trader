@@ -25,9 +25,10 @@ import {
 } from '@/lib/markets'
 import type { SoccerEvent, SoccerMarket, SelectedOutcome } from '@/types'
 
-type FilterKey = 'focus' | 'live' | 'not_started' | 'ended' | 'all'
+type FilterKey = 'followed' | 'focus' | 'live' | 'not_started' | 'ended' | 'all'
 
 const FILTER_TABS: { key: FilterKey; label: (counts: Record<string, number>) => string }[] = [
+  { key: 'followed', label: () => '关注' },
   { key: 'focus', label: () => '重点' },
   { key: 'live', label: (c) => `进行中 (${c.live})` },
   { key: 'not_started', label: (c) => `即将开始 (${c.not_started})` },
@@ -66,6 +67,27 @@ export default function SoccerPage() {
     localStorage.setItem('pm-favorite-markets', JSON.stringify(Array.from(favoriteIds)))
   }, [favoriteIds])
 
+  const [followedEventIds, setFollowedEventIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('pm-followed-events')
+      return new Set<string>(raw ? (JSON.parse(raw) as string[]) : [])
+    } catch {
+      return new Set<string>()
+    }
+  })
+  useEffect(() => {
+    localStorage.setItem('pm-followed-events', JSON.stringify(Array.from(followedEventIds)))
+  }, [followedEventIds])
+
+  function toggleFollowEvent(eventId: string) {
+    setFollowedEventIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(eventId)) next.delete(eventId)
+      else next.add(eventId)
+      return next
+    })
+  }
+
   const [collapsedTypes, setCollapsedTypes] = useState<Set<string>>(() => {
     return new Set<string>()
   })
@@ -91,9 +113,10 @@ export default function SoccerPage() {
     return events.filter((e) => {
       if (filter === 'all') return true
       if (filter === 'focus') return e.match_status === 'live' || e.match_status === 'not_started'
+      if (filter === 'followed') return followedEventIds.has(e.id)
       return e.match_status === filter
     })
-  }, [events, filter])
+  }, [events, filter, followedEventIds])
 
   useEffect(() => {
     loadEvents()
@@ -359,6 +382,8 @@ export default function SoccerPage() {
                     key={evt.id}
                     event={evt}
                     active={selectedEvent?.id === evt.id}
+                    followed={followedEventIds.has(evt.id)}
+                    onToggleFollow={() => toggleFollowEvent(evt.id)}
                     onClick={() => handleSelectEvent(evt)}
                   />
                 ))
@@ -643,10 +668,14 @@ export default function SoccerPage() {
 function MatchCard({
   event,
   active,
+  followed,
+  onToggleFollow,
   onClick,
 }: {
   event: SoccerEvent
   active: boolean
+  followed: boolean
+  onToggleFollow: () => void
   onClick: () => void
 }) {
   const homeZh = event.home_team_zh || event.home_team_en || '-'
@@ -674,9 +703,17 @@ function MatchCard({
     >
       <div className="flex items-center justify-between gap-2 px-3 py-2.5">
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-            <Trophy className="h-3.5 w-3.5" />
-          </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleFollow()
+            }}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-muted"
+            title={followed ? '取消关注' : '关注比赛'}
+          >
+            <Star className={cn('h-3.5 w-3.5 transition-colors', followed ? 'fill-amber-400 text-amber-400' : 'text-muted-foreground')} />
+          </button>
           <div className="min-w-0">
             <p className="truncate text-xs font-semibold text-foreground">
               {homeZh} <span className="text-muted-foreground">vs</span> {awayZh}

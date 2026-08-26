@@ -5,7 +5,7 @@
  */
 
 import { pool } from '../../soccer/db.js'
-import type { PriceMonitorRule, PriceTriggerRecord } from './types.js'
+import type { PriceMonitorRule, PriceTriggerRecord, PriceBotLog } from './types.js'
 
 // ==================== 表结构 ====================
 
@@ -56,6 +56,23 @@ export async function ensureTables(): Promise<void> {
       KEY idx_rule (rule_id),
       KEY idx_token (token_id),
       KEY idx_time (triggered_at),
+      KEY idx_event (event_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS price_bot_logs (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      rule_id BIGINT NOT NULL,
+      token_id VARCHAR(200) NOT NULL,
+      event_id VARCHAR(100) NOT NULL,
+      outcome VARCHAR(100) NOT NULL,
+      action VARCHAR(20) NOT NULL COMMENT 'start/stop/price_update/trigger',
+      price DECIMAL(8,4) DEFAULT NULL,
+      detail TEXT DEFAULT NULL,
+      logged_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_rule (rule_id),
+      KEY idx_time (logged_at),
       KEY idx_event (event_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
@@ -266,6 +283,71 @@ export async function getLastTriggerTime(ruleId: number): Promise<string | null>
   return t instanceof Date ? t.toISOString() : String(t)
 }
 
+// ==================== 日志 CRUD ====================
+
+export async function recordLog(log: Omit<PriceBotLog, 'id' | 'loggedAt'>): Promise<number> {
+  await ensureTables()
+  const [result] = await pool.execute<any>(
+    `INSERT INTO price_bot_logs
+       (rule_id, token_id, event_id, outcome, action, price, detail)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      log.ruleId,
+      log.tokenId,
+      log.eventId,
+      log.outcome,
+      log.action,
+      log.price ?? null,
+      log.detail ?? null,
+    ],
+  )
+  return Number(result.insertId)
+}
+
+export async function listLogs(options: {
+  ruleId?: number
+  eventId?: string
+  action?: string
+  limit?: number
+  offset?: number
+} = {}): Promise<{ logs: PriceBotLog[]; total: number }> {
+  await ensureTables()
+
+  const where: string[] = []
+  const params: any[] = []
+
+  if (options.ruleId) {
+    where.push('rule_id = ?')
+    params.push(options.ruleId)
+  }
+  if (options.eventId) {
+    where.push('event_id = ?')
+    params.push(options.eventId)
+  }
+  if (options.action) {
+    where.push('action = ?')
+    params.push(options.action)
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+  const [countRows] = await pool.execute<any[]>(
+    `SELECT COUNT(*) as total FROM price_bot_logs ${whereSql}`,
+    params,
+  )
+  const total = countRows[0]?.total ?? 0
+
+  const limit = Math.max(1, Math.min(1000, Math.floor(Number(options.limit) ?? 100)))
+  const offset = Math.max(0, Math.floor(Number(options.offset) ?? 0))
+  const [rows] = await pool.execute<any[]>(
+    `SELECT * FROM price_bot_logs ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
+    params,
+  )
+
+  const logs = rows.map(rowToLog)
+  return { logs, total }
+}
+
 // ==================== 行映射 ====================
 
 function rowToRule(row: any): PriceMonitorRule {
@@ -306,5 +388,19 @@ function rowToTrigger(row: any): PriceTriggerRecord {
     threshold: Number(row.threshold),
     signalType: String(row.signal_type),
     triggeredAt: row.triggered_at ? String(row.triggered_at) : undefined,
+  }
+}
+
+function rowToLog(row: any): PriceBotLog {
+  return {
+    id: Number(row.id),
+    ruleId: Number(row.rule_id),
+    tokenId: String(row.token_id),
+    eventId: String(row.event_id),
+    outcome: String(row.outcome),
+    action: row.action as any,
+    price: row.price != null ? Number(row.price) : null,
+    detail: row.detail ? String(row.detail) : null,
+    loggedAt: row.logged_at ? String(row.logged_at) : undefined,
   }
 }

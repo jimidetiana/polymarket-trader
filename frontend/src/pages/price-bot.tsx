@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Play, Pause, Zap, Settings, Activity, RefreshCw, Plus, Trash2, TrendingUp, TrendingDown, Bell, Clock, Radio } from 'lucide-react'
+import { Play, Pause, Zap, Settings, Activity, RefreshCw, Plus, Trash2, TrendingUp, TrendingDown, Bell, Clock, Radio, FileText } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { cn } from '@/lib/utils'
 import { fetchEvents, fetchEventMarkets } from '@/lib/api'
@@ -19,13 +19,15 @@ import {
   stopPriceBotMonitor,
   triggerPriceBotMonitor,
   fetchPriceBotTriggers,
+  fetchPriceBotLogs,
   type PriceBotStatus,
   type PriceMonitorRule,
   type PriceMonitorState,
   type PriceTriggerRecord,
+  type PriceBotLog,
 } from '@/lib/api'
 
-type Tab = 'rules' | 'monitors' | 'triggers'
+type Tab = 'rules' | 'monitors' | 'triggers' | 'logs'
 
 const RULE_TYPE_LABELS: Record<string, string> = {
   percent_change: '百分比变化',
@@ -45,12 +47,20 @@ const SIGNAL_LABELS: Record<string, { label: string; className: string; icon: ty
   alert: { label: '告警', className: 'bg-yellow-500/10 text-yellow-600 border-yellow-500/30', icon: Bell },
 }
 
+const ACTION_LABELS: Record<string, { label: string; className: string; icon: typeof Play }> = {
+  start: { label: '启动', className: 'bg-green-500/10 text-green-600 border-green-500/30', icon: Play },
+  stop: { label: '停止', className: 'bg-red-500/10 text-red-600 border-red-500/30', icon: Pause },
+  trigger: { label: '触发', className: 'bg-blue-500/10 text-blue-600 border-blue-500/30', icon: Zap },
+  price_update: { label: '价格', className: 'bg-gray-500/10 text-gray-600 border-gray-500/30', icon: TrendingUp },
+}
+
 export default function PriceBotPage() {
   const [status, setStatus] = useState<PriceBotStatus | null>(null)
   const [tab, setTab] = useState<Tab>('rules')
   const [rules, setRules] = useState<PriceMonitorRule[]>([])
   const [monitors, setMonitors] = useState<PriceMonitorState[]>([])
   const [triggers, setTriggers] = useState<PriceTriggerRecord[]>([])
+  const [logs, setLogs] = useState<PriceBotLog[]>([])
   const [loading, setLoading] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showAddRule, setShowAddRule] = useState(false)
@@ -94,17 +104,27 @@ export default function PriceBotPage() {
     }
   }, [])
 
+  const loadLogs = useCallback(async () => {
+    try {
+      const { logs: l } = await fetchPriceBotLogs({ limit: 100 })
+      setLogs(l)
+    } catch {
+      // ignore
+    }
+  }, [])
+
   useEffect(() => {
     loadStatus()
     loadRules()
     loadMonitors()
     loadTriggers()
+    loadLogs()
     const interval = setInterval(() => {
       loadStatus()
       loadMonitors()
     }, 5000)
     return () => clearInterval(interval)
-  }, [loadStatus, loadRules, loadMonitors, loadTriggers])
+  }, [loadStatus, loadRules, loadMonitors, loadTriggers, loadLogs])
 
   async function handleStart() {
     try {
@@ -163,6 +183,7 @@ export default function PriceBotPage() {
       else if (action === 'stop') await stopPriceBotMonitor(ruleId)
       else await triggerPriceBotMonitor(ruleId)
       await loadMonitors()
+      await loadLogs()
       if (action === 'trigger') await loadTriggers()
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err))
@@ -243,14 +264,17 @@ export default function PriceBotPage() {
             { key: 'rules' as Tab, label: '监控规则', icon: Activity },
             { key: 'monitors' as Tab, label: '监控状态', icon: Radio },
             { key: 'triggers' as Tab, label: '触发记录', icon: Bell },
+            { key: 'logs' as Tab, label: '日志', icon: FileText },
           ]).map((t) => (
             <button
               key={t.key}
+              type="button"
               onClick={() => {
                 setTab(t.key)
                 if (t.key === 'rules') loadRules()
                 else if (t.key === 'monitors') loadMonitors()
-                else loadTriggers()
+                else if (t.key === 'triggers') loadTriggers()
+                else loadLogs()
               }}
               className={cn(
                 'flex items-center gap-1 rounded-md px-3 py-1 text-[11px] font-medium',
@@ -263,6 +287,7 @@ export default function PriceBotPage() {
           ))}
           {tab === 'rules' && (
             <button
+              type="button"
               onClick={() => setShowAddRule(!showAddRule)}
               className={cn(
                 'ml-auto flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] hover:bg-muted',
@@ -270,12 +295,23 @@ export default function PriceBotPage() {
               )}
             >
               <Plus className="h-3 w-3" />
-              添加规则
+              创建价格监控机器人
             </button>
           )}
           {tab === 'triggers' && (
             <button
+              type="button"
               onClick={loadTriggers}
+              className="ml-auto flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] hover:bg-muted"
+            >
+              <RefreshCw className="h-3 w-3" />
+              刷新
+            </button>
+          )}
+          {tab === 'logs' && (
+            <button
+              type="button"
+              onClick={loadLogs}
               className="ml-auto flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] hover:bg-muted"
             >
               <RefreshCw className="h-3 w-3" />
@@ -289,6 +325,7 @@ export default function PriceBotPage() {
           {tab === 'rules' && (
             <RulesTab
               rules={rules}
+              monitors={monitors}
               showAddRule={showAddRule}
               onAddRule={async (rule) => {
                 try {
@@ -301,6 +338,7 @@ export default function PriceBotPage() {
               }}
               onDeleteRule={handleDeleteRule}
               onToggleRule={handleToggleRule}
+              onMonitorAction={handleMonitorAction}
             />
           )}
           {tab === 'monitors' && (
@@ -312,6 +350,9 @@ export default function PriceBotPage() {
           )}
           {tab === 'triggers' && (
             <TriggersTab triggers={triggers} loading={loading} />
+          )}
+          {tab === 'logs' && (
+            <LogsTab logs={logs} rules={rules} />
           )}
         </div>
       </div>
@@ -359,16 +400,20 @@ function SettingsPanel({
 
 function RulesTab({
   rules,
+  monitors,
   showAddRule,
   onAddRule,
   onDeleteRule,
   onToggleRule,
+  onMonitorAction,
 }: {
   rules: PriceMonitorRule[]
+  monitors: PriceMonitorState[]
   showAddRule: boolean
   onAddRule: (rule: Omit<PriceMonitorRule, 'id' | 'createdAt' | 'updatedAt'>) => void
   onDeleteRule: (id: number) => void
   onToggleRule: (rule: PriceMonitorRule) => void
+  onMonitorAction: (ruleId: number, action: 'start' | 'stop' | 'trigger') => void
 }) {
   if (showAddRule) {
     return <AddRuleForm onAdd={onAddRule} />
@@ -377,19 +422,29 @@ function RulesTab({
   if (rules.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        暂无监控规则，点击"添加规则"创建
+        暂无监控规则，点击"创建价格监控机器人"创建
       </div>
     )
   }
+
+  const monitorMap = new Map(monitors.map((m) => [m.ruleId, m]))
 
   return (
     <div className="divide-y">
       {rules.map((rule) => {
         const sig = SIGNAL_LABELS[rule.signalType] ?? SIGNAL_LABELS.alert
+        const monitor = rule.id ? monitorMap.get(rule.id) : null
+        const isRunning = monitor?.running ?? false
         return (
           <div key={rule.id} className="flex items-center gap-3 px-4 py-2.5">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    'flex h-2 w-2 items-center justify-center rounded-full',
+                    isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400',
+                  )}
+                />
                 <span className={cn('inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] font-medium', sig.className)}>
                   <sig.icon className="h-2.5 w-2.5" />
                   {sig.label}
@@ -408,10 +463,33 @@ function RulesTab({
                 {rule.ruleType === 'price_break' && rule.targetPrice != null && ` · 目标价: ${rule.targetPrice}`}
                 {rule.ruleType === 'price_range' && ` · 区间: ${rule.priceLow ?? '-'} ~ ${rule.priceHigh ?? '-'}`}
                 {` · 冷却: ${rule.cooldownSeconds}s`}
+                {monitor?.lastPrice != null && ` · 当前价: ${monitor.lastPrice.toFixed(4)}`}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1">
+              {isRunning ? (
+                <button
+                  type="button"
+                  onClick={() => rule.id && onMonitorAction(rule.id, 'stop')}
+                  className="flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] text-red-600 hover:bg-red-500/10"
+                >
+                  <Pause className="h-2.5 w-2.5" />
+                  停止
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => rule.id && onMonitorAction(rule.id, 'start')}
+                  disabled={!rule.enabled}
+                  className="flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] text-green-600 hover:bg-green-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={!rule.enabled ? '请先启用规则' : undefined}
+                >
+                  <Play className="h-2.5 w-2.5" />
+                  启动
+                </button>
+              )}
               <button
+                type="button"
                 onClick={() => onToggleRule(rule)}
                 className={cn(
                   'rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted',
@@ -421,6 +499,7 @@ function RulesTab({
                 {rule.enabled ? '禁用' : '启用'}
               </button>
               <button
+                type="button"
                 onClick={() => rule.id && onDeleteRule(rule.id)}
                 className="rounded border px-1.5 py-0.5 text-[10px] text-red-600 hover:bg-red-500/10"
               >
@@ -672,7 +751,7 @@ function AddRuleForm({
           disabled={submitting}
           className="rounded-md bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
-          {submitting ? '创建中...' : '创建规则'}
+          {submitting ? '创建中...' : '创建机器人'}
         </button>
       </div>
     </div>
@@ -832,6 +911,65 @@ function TriggersTab({
             {t.triggeredAt && (
               <span className="shrink-0 text-[10px] text-muted-foreground">
                 {new Date(t.triggeredAt).toLocaleString('zh-CN')}
+              </span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ==================== Logs Tab ====================
+
+function LogsTab({
+  logs,
+  rules,
+}: {
+  logs: PriceBotLog[]
+  rules: PriceMonitorRule[]
+}) {
+  if (logs.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        暂无日志记录
+      </div>
+    )
+  }
+
+  const ruleMap = new Map(rules.map((r) => [r.id, r]))
+
+  return (
+    <div className="divide-y">
+      {logs.map((log, i) => {
+        const act = ACTION_LABELS[log.action] ?? ACTION_LABELS.price_update
+        const rule = log.ruleId ? ruleMap.get(log.ruleId) : null
+        return (
+          <div key={log.id ?? i} className="flex items-center gap-3 px-4 py-2.5">
+            <span className={cn('inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] font-medium', act.className)}>
+              <act.icon className="h-2.5 w-2.5" />
+              {act.label}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="font-medium">{rule ? RULE_TYPE_LABELS[rule.ruleType] ?? rule.ruleType : `规则#${log.ruleId}`}</span>
+                {rule && <span className="text-muted-foreground">{rule.outcome}</span>}
+                {log.outcome && !rule && <span className="text-muted-foreground">{log.outcome}</span>}
+              </div>
+              <div className="mt-0.5 flex items-center gap-3 text-[10px] text-muted-foreground">
+                {log.price != null && (
+                  <span className="font-mono text-foreground/80">
+                    {log.price.toFixed(4)}
+                  </span>
+                )}
+                {log.detail && (
+                  <span className="truncate">{log.detail}</span>
+                )}
+              </div>
+            </div>
+            {log.loggedAt && (
+              <span className="shrink-0 text-[10px] text-muted-foreground">
+                {new Date(log.loggedAt).toLocaleString('zh-CN')}
               </span>
             )}
           </div>

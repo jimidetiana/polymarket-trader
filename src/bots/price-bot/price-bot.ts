@@ -24,6 +24,8 @@ import {
   recordTrigger,
   listTriggers,
   getLastTriggerTime,
+  recordLog,
+  listLogs,
 } from './db.js';
 import { DEFAULT_CONFIG } from './types.js';
 import type {
@@ -575,6 +577,17 @@ async function handleTrigger(
     threshold: evaluation.threshold,
     signalType: signal,
   })
+
+  // 记录触发日志
+  await recordLog({
+    ruleId: rule.id!,
+    tokenId: rule.tokenId,
+    eventId: rule.eventId,
+    outcome: rule.outcome,
+    action: 'trigger',
+    price: evaluation.currentPrice,
+    detail: `${signal} ${evaluation.direction} ${rule.outcome}, 价格 ${evaluation.previousPrice.toFixed(4)} → ${evaluation.currentPrice.toFixed(4)} (${(evaluation.changePercent * 100).toFixed(2)}%)`,
+  }).catch(() => {})
 }
 
 // ==================== 启停控制 ====================
@@ -619,11 +632,29 @@ export async function startMonitor(ruleId: number): Promise<void> {
 
   // 如果价格缓存里已有该 token 的价格，直接用做基准价
   const cached = priceCache.get(rule.tokenId)
+  let startPrice: number | null = null
   if (cached?.lastPrice != null && monitor.baselinePrice == null) {
     monitor.baselinePrice = cached.lastPrice
     monitor.lastPrice = cached.lastPrice
     monitor.lastPollTime = cached.timestamp
+    startPrice = cached.lastPrice
   }
+
+  const startTime = new Date().toISOString()
+  console.log(`[PriceBot] 规则 #${ruleId} 启动于 ${startTime}, 价格: ${startPrice ?? '待获取'}`)
+
+  // 记录启动日志
+  await recordLog({
+    ruleId,
+    tokenId: rule.tokenId,
+    eventId: rule.eventId,
+    outcome: rule.outcome,
+    action: 'start',
+    price: startPrice,
+    detail: `监控启动, 基准价格: ${startPrice ?? '待获取'}`,
+  }).catch((err) => {
+    console.error(`[PriceBot] 记录启动日志失败:`, err.message)
+  })
 
   console.log(`[PriceBot] 启动价格监控: 规则 #${ruleId} (${rule.outcome})`)
 
@@ -636,7 +667,20 @@ export function stopMonitor(ruleId: number): void {
   const monitor = state.monitors.get(ruleId)
   if (monitor) {
     monitor.running = false
-    console.log(`[PriceBot] 停止价格监控: 规则 #${ruleId}`)
+    const stopPrice = monitor.lastPrice
+    const stopTime = new Date().toISOString()
+    console.log(`[PriceBot] 规则 #${ruleId} 停止于 ${stopTime}, 最后价格: ${stopPrice ?? 'N/A'}`)
+
+    // 记录停止日志（fire-and-forget）
+    recordLog({
+      ruleId,
+      tokenId: monitor.tokenId,
+      eventId: '',
+      outcome: '',
+      action: 'stop',
+      price: stopPrice,
+      detail: `监控停止, 最后价格: ${stopPrice ?? 'N/A'}`,
+    }).catch(() => {})
   }
 
   // 刷新 WS 订阅
@@ -776,4 +820,4 @@ export async function triggerMonitorCycle(ruleId: number): Promise<void> {
 
 // ==================== 规则 CRUD 导出 ====================
 
-export { createRule, updateRule, deleteRule, getRule, listRules, listTriggers }
+export { createRule, updateRule, deleteRule, getRule, listRules, listTriggers, listLogs }

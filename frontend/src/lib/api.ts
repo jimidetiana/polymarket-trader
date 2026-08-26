@@ -884,6 +884,18 @@ export interface PriceTriggerRecord {
   triggeredAt?: string
 }
 
+export interface PriceBotLog {
+  id?: number
+  ruleId: number
+  tokenId: string
+  eventId: string
+  outcome: string
+  action: 'start' | 'stop' | 'price_update' | 'trigger'
+  price: number | null
+  detail: string | null
+  loggedAt?: string
+}
+
 export async function fetchPriceBotStatus(): Promise<PriceBotStatus> {
   const data = await request<PriceBotStatus>('/api/bots/price-bot/status')
   return data
@@ -999,5 +1011,24 @@ export async function fetchPriceBotTriggers(params?: {
     `/api/bots/price-bot/triggers?${qs}`,
   )
   return { triggers: data.triggers, total: data.total }
+}
+
+export async function fetchPriceBotLogs(params?: {
+  limit?: number
+  offset?: number
+  ruleId?: number
+  eventId?: string
+  action?: string
+}): Promise<{ logs: PriceBotLog[]; total: number }> {
+  const qs = new URLSearchParams()
+  if (params?.limit) qs.set('limit', String(params.limit))
+  if (params?.offset) qs.set('offset', String(params.offset))
+  if (params?.ruleId) qs.set('ruleId', String(params.ruleId))
+  if (params?.eventId) qs.set('eventId', params.eventId)
+  if (params?.action) qs.set('action', params.action)
+  const data = await request<{ logs: PriceBotLog[]; total: number }>(
+    `/api/bots/price-bot/logs?${qs}`,
+  )
+  return { logs: data.logs, total: data.total }
 }
 

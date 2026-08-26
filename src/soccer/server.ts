@@ -64,6 +64,7 @@ import {
   getRule,
   listRules,
   listTriggers,
+  listLogs,
 } from '../bots/price-bot/price-bot.js';
 import { config } from '../config.js';
 
@@ -212,6 +213,7 @@ app.get('/api/soccer/orders/diagnostic', asyncHandler(async (_req, res) => {
     const clobTradeIds = new Set<string>();
     for (const t of clobTrades) {
       if (t.taker_order_id) clobTradeIds.add(t.taker_order_id);
+      if (t.maker_order_id) clobTradeIds.add(t.maker_order_id);
     }
 
     const localClobIds = new Set(localClobMap.keys());
@@ -221,7 +223,7 @@ app.get('/api/soccer/orders/diagnostic', asyncHandler(async (_req, res) => {
       .filter(id => !localClobIds.has(id))
       .map(id => {
         const openOrder = clobOpenOrders.find(o => (o.id || o.orderID) === id);
-        const trade = clobTrades.find(t => t.taker_order_id === id);
+        const trade = clobTrades.find(t => t.taker_order_id === id || t.maker_order_id === id);
         return {
           clobOrderId: id,
           inOpenOrders: !!openOrder,
@@ -266,7 +268,7 @@ app.get('/api/soccer/orders/diagnostic', asyncHandler(async (_req, res) => {
       if (local.order_status === 'settled' || local.order_status === 'failed') continue;
 
       const openOrder = clobOpenOrders.find(o => (o.id || o.orderID) === clobId);
-      const trades = clobTrades.filter(t => t.taker_order_id === clobId);
+      const trades = clobTrades.filter(t => t.taker_order_id === clobId || t.maker_order_id === clobId);
 
       if (openOrder) {
         const clobStatus = openOrder.status;
@@ -318,6 +320,7 @@ app.get('/api/soccer/orders/diagnostic', asyncHandler(async (_req, res) => {
       missingLocal,
       missingClob,
       statusMismatch,
+      rawTrades: clobTrades,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message || '诊断失败' });
@@ -1432,6 +1435,19 @@ app.get('/api/bots/price-bot/triggers', asyncHandler(async (req, res) => {
     ruleId: ruleId ? Number(ruleId) : undefined,
     eventId: eventId as string | undefined,
     tokenId: tokenId as string | undefined,
+  });
+  res.json({ success: true, ...result });
+}));
+
+// 监控日志
+app.get('/api/bots/price-bot/logs', asyncHandler(async (req, res) => {
+  const { limit, offset, ruleId, eventId, action } = req.query;
+  const result = await listLogs({
+    limit: limit ? Number(limit) : 100,
+    offset: offset ? Number(offset) : 0,
+    ruleId: ruleId ? Number(ruleId) : undefined,
+    eventId: eventId as string | undefined,
+    action: action as string | undefined,
   });
   res.json({ success: true, ...result });
 }));

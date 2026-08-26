@@ -106,6 +106,20 @@ export interface PriceMonitorState {
   lastPrice: number | null
 }
 
+// ==================== 监控日志 ====================
+
+export interface PriceBotLog {
+  id?: number
+  ruleId: number
+  tokenId: string
+  eventId: string
+  outcome: string
+  action: 'start' | 'stop' | 'price_update' | 'trigger'
+  price: number | null
+  detail: string | null
+  loggedAt?: string
+}
+
 // ==================== 机器人状态 ====================
 
 interface BotState {
