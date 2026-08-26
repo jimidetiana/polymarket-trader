@@ -38,6 +38,7 @@ const FILTER_TABS: { key: FilterKey; label: (counts: Record<string, number>) => 
 export default function SoccerPage() {
   const [events, setEvents] = useState<SoccerEvent[]>([])
   const [loading, setLoading] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [filter, setFilter] = useState<FilterKey>('focus')
   const [fetchStatus, setFetchStatus] = useState('加载中...')
   const [lastUpdated, setLastUpdated] = useState('--')
@@ -98,8 +99,11 @@ export default function SoccerPage() {
     loadEvents()
     loadWallet()
     loadOrders()
-    // 每 30 秒刷新钱包余额
-    const timer = setInterval(loadWallet, 30000)
+    // 每 30 秒刷新钱包余额和订单状态
+    const timer = setInterval(() => {
+      loadWallet()
+      loadOrders()
+    }, 30000)
     return () => clearInterval(timer)
   }, [])
 
@@ -226,13 +230,15 @@ export default function SoccerPage() {
     type: 'market' | 'limit'
   }) {
     if (!selected) return
-    const size = values.size
-    const price = values.type === 'market' ? selected.price : values.price
-    if (!size || size <= 0 || price <= 0 || price >= 1) {
-      setOrderMessage({ text: '请填写有效的数量和价格（0 < 价格 < 1）', error: true })
-      return
-    }
+    if (submitting) return
+    setSubmitting(true)
     try {
+      const size = values.size
+      const price = values.type === 'market' ? selected.price : values.price
+      if (!size || size <= 0 || price <= 0 || price >= 1) {
+        setOrderMessage({ text: '请填写有效的数量和价格（0 < 价格 < 1）', error: true })
+        return
+      }
       const result = await submitOrder({
         market_id: selected.marketId,
         token_id: selected.tokenId,
@@ -250,6 +256,8 @@ export default function SoccerPage() {
         text: `下单失败：${err instanceof Error ? err.message : String(err)}`,
         error: true,
       })
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -516,6 +524,7 @@ export default function SoccerPage() {
                         currentPrice={selected.price}
                         maxAmount={wallet ? wallet.balance_usdc : 10000}
                         externalPrice={orderBookClick}
+                        submitting={submitting}
                         onSubmit={handleOrderSubmit}
                       />
                     </div>
@@ -876,9 +885,11 @@ function MarketCard({
   const gridClass =
     outcomes.length === 3
       ? 'grid-cols-3'
-      : outcomes.length > 3
-        ? 'grid-cols-2 sm:grid-cols-3'
-        : 'grid-cols-2'
+      : outcomes.length === 6
+        ? 'grid-cols-2'
+        : outcomes.length > 3
+          ? 'grid-cols-2 sm:grid-cols-3'
+          : 'grid-cols-2'
 
   return (
     <div className="flex flex-col rounded-lg border border-border bg-card p-3">

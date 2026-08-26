@@ -14,6 +14,7 @@ interface OrderFormProps {
   currentPrice: number
   maxAmount?: number
   externalPrice?: ExternalPriceUpdate | null
+  submitting?: boolean
   onSubmit: (values: {
     side: 'BUY' | 'SELL'
     size: number
@@ -31,6 +32,7 @@ export function OrderForm({
   currentPrice,
   maxAmount = 10000,
   externalPrice,
+  submitting = false,
   onSubmit,
 }: OrderFormProps) {
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
@@ -70,7 +72,7 @@ export function OrderForm({
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!isValid) return
+    if (!isValid || submitting) return
     onSubmit({ side, size, price, type })
   }
 
@@ -322,7 +324,7 @@ export function OrderForm({
 
       <button
         type="submit"
-        disabled={!isValid}
+        disabled={!isValid || submitting}
         className={cn(
           'w-full rounded-md py-2.5 text-sm font-semibold text-white transition-colors',
           side === 'BUY'
@@ -330,7 +332,7 @@ export function OrderForm({
             : 'bg-rose-600 hover:bg-rose-700 disabled:bg-rose-600/50',
         )}
       >
-        {side === 'BUY' ? '买入' : '卖出'} {outcomeName} · ${total.toFixed(2)}
+        {submitting ? '处理中...' : `${side === 'BUY' ? '买入' : '卖出'} ${outcomeName} · $${total.toFixed(2)}`}
       </button>
     </form>
   )

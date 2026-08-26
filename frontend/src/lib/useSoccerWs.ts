@@ -58,6 +58,7 @@ export function useSoccerWs(tokenIds: string[]) {
           type: 'market',
           assets_ids: ids,
           custom_feature_enabled: true,
+          level: 1,
         }),
       )
       pingRef.current = setInterval(() => {

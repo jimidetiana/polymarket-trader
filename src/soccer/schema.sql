@@ -48,6 +48,52 @@ CREATE TABLE IF NOT EXISTS soccer_markets (
   CONSTRAINT fk_market_event FOREIGN KEY (event_id) REFERENCES soccer_events(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 价值投注机器人 - 初盘状态表
+CREATE TABLE IF NOT EXISTS value_bot_match_state (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  event_id VARCHAR(100) NOT NULL,
+  home_team VARCHAR(200) NOT NULL,
+  away_team VARCHAR(200) NOT NULL,
+  lambda_home DECIMAL(8,4) NOT NULL,
+  lambda_away DECIMAL(8,4) NOT NULL,
+  initial_home_prob DECIMAL(8,4) NOT NULL,
+  initial_draw_prob DECIMAL(8,4) NOT NULL,
+  initial_away_prob DECIMAL(8,4) NOT NULL,
+  bzzoiro_event_id BIGINT DEFAULT NULL,
+  source VARCHAR(20) DEFAULT 'polymarket',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_event (event_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 价值投注机器人 - 记录表
+CREATE TABLE IF NOT EXISTS value_bet_records (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  bot_id VARCHAR(50) NOT NULL,
+  polymarket_event_id VARCHAR(100) NOT NULL,
+  bzzoiro_event_id BIGINT DEFAULT NULL,
+  market_id VARCHAR(100) NOT NULL,
+  market_type VARCHAR(50) NOT NULL,
+  question VARCHAR(500) DEFAULT NULL,
+  outcome VARCHAR(100) NOT NULL,
+  handicap DECIMAL(10,3) DEFAULT NULL,
+  model_probability DECIMAL(8,4) NOT NULL,
+  market_price DECIMAL(8,4) NOT NULL,
+  implied_probability DECIMAL(8,4) NOT NULL,
+  edge DECIMAL(8,4) NOT NULL,
+  match_minute INT NOT NULL,
+  current_score VARCHAR(20) NOT NULL,
+  lambda_home DECIMAL(8,4) NOT NULL,
+  lambda_away DECIMAL(8,4) NOT NULL,
+  recommendation VARCHAR(20) NOT NULL,
+  status VARCHAR(20) DEFAULT 'recorded',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_bot (bot_id),
+  KEY idx_event (polymarket_event_id),
+  KEY idx_created (created_at),
+  KEY idx_edge (edge)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS soccer_orders (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   market_id BIGINT NOT NULL,

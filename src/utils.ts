@@ -16,8 +16,8 @@ export function urlSafeBase64WithPadding(buf: Buffer): string {
 }
 
 export function generateSalt(): number {
-  // Keep below Number.MAX_SAFE_INTEGER because the wire body serializes salt as a JSON number.
-  return crypto.randomInt(0, Number.MAX_SAFE_INTEGER);
+  // Keep within crypto.randomInt range (2^48) and also below Number.MAX_SAFE_INTEGER.
+  return crypto.randomInt(0, 281474976710655);
 }
 
 export function sleep(ms: number): Promise<void> {

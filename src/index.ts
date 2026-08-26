@@ -4,7 +4,6 @@ import { GammaClient } from './api/gamma.js';
 import { ClobClient } from './api/clob.js';
 import { DataApiClient } from './api/data.js';
 import { getOrCreateClobCredentials } from './auth.js';
-import { SimpleMarketMaker } from './strategies/marketMaker.js';
 import { ClobMarketWebSocket } from './ws/marketWs.js';
 import { ClobUserWebSocket } from './ws/userWs.js';
 import { parseOutcomes } from './utils.js';
@@ -56,19 +55,8 @@ async function main() {
   userWs.on('trade', (msg) => console.log('[WS trade]', msg.id, msg.status, msg.size));
   userWs.connect();
 
-  // Start simple market-making strategy.
-  const strategy = new SimpleMarketMaker(clob, signer, {
-    tokenId,
-    conditionId: market.conditionId,
-    orderSize: config.orderSize,
-    maxPosition: config.maxPosition,
-    spread: config.spread,
-    pollIntervalMs: config.pollIntervalMs,
-  });
-
   const shutdown = async (signal: string) => {
     console.log(`\nReceived ${signal}, shutting down...`);
-    strategy.stop();
     marketWs.close();
     userWs.close();
     try {
@@ -83,7 +71,10 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  await strategy.start();
+  console.log('Bot is running. Press Ctrl+C to stop.');
+
+  // Keep process alive.
+  await new Promise(() => {});
 }
 
 main().catch((err) => {

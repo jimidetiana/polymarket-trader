@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Activity, LayoutDashboard, Trophy, Languages, Moon, Sun, Wallet } from 'lucide-react'
+import { Activity, LayoutDashboard, Trophy, Languages, Moon, Sun, Wallet, Radio, Bot, ClipboardList, LineChart } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDarkMode } from '@/components/theme-provider'
 import { WalletBalance } from '@/components/wallet-balance'
@@ -18,6 +18,10 @@ export function Layout({ title, subtitle, children, actions }: LayoutProps) {
   const nav = [
     { to: '/', label: '主控台', icon: LayoutDashboard },
     { to: '/soccer', label: '足球赛事', icon: Trophy },
+    { to: '/orders', label: '订单管理', icon: ClipboardList },
+    { to: '/live', label: '赛事监听', icon: Radio },
+    { to: '/value-bot', label: '价值机器人', icon: Bot },
+    { to: '/price-bot', label: '价格监控', icon: LineChart },
     { to: '/translations', label: '翻译', icon: Languages },
     { to: '/wallet', label: '钱包', icon: Wallet },
   ]

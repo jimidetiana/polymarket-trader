@@ -35,6 +35,7 @@ interface BalanceResult {
   chain: string;
   symbol: string;
   balance: number;
+  success: boolean;
 }
 
 function encodeBalanceOf(address: string): string {
@@ -56,12 +57,12 @@ async function queryTokenBalance(chain: string, rpcUrl: string, tokens: typeof B
       const result = resp.data?.result as string | undefined;
       if (result && result !== '0x' && result !== '0x0') {
         const balance = Number(BigInt(result)) / Math.pow(10, token.decimals);
-        results.push({ chain, symbol: token.symbol, balance });
+        results.push({ chain, symbol: token.symbol, balance, success: true });
       } else {
-        results.push({ chain, symbol: token.symbol, balance: 0 });
+        results.push({ chain, symbol: token.symbol, balance: 0, success: true });
       }
     } catch {
-      results.push({ chain, symbol: token.symbol, balance: 0 });
+      results.push({ chain, symbol: token.symbol, balance: 0, success: false });
     }
   }
   return results;
@@ -79,26 +80,27 @@ async function queryNativeBalance(chain: string, rpcUrl: string, address: string
     const symbol = chain === 'bsc' ? 'BNB' : 'MATIC';
     if (result && result !== '0x' && result !== '0x0') {
       const balance = Number(BigInt(result)) / Math.pow(10, 18);
-      return { chain, symbol, balance };
+      return { chain, symbol, balance, success: true };
     }
-    return { chain, symbol, balance: 0 };
+    return { chain, symbol, balance: 0, success: true };
   } catch {
     const symbol = chain === 'bsc' ? 'BNB' : 'MATIC';
-    return { chain, symbol, balance: 0 };
+    return { chain, symbol, balance: 0, success: false };
   }
 }
 
 // Query Polymarket internal balance via V2 CLOB API (POLY_1271 deposit wallet)
-async function getPolymarketSignerBalance(): Promise<number> {
+// 返回 null 表示查询失败，返回数字（含0）表示查询成功
+async function getPolymarketSignerBalance(): Promise<number | null> {
   try {
-    if (!config.privateKey) return 0;
+    if (!config.privateKey) return null;
     const result = await getV2Balance();
     const balance = Number(result?.balance || 0);
     console.log('[Polymarket V2] deposit wallet 余额:', balance, '(raw pUSD)');
     return balance;
   } catch (err: any) {
     console.warn('[Polymarket V2] 余额查询失败:', err.response?.data?.error || err.message?.slice(0, 100));
-    return 0;
+    return null;
   }
 }
 
@@ -158,7 +160,7 @@ export async function getAllBalances(address: string): Promise<BalanceResult[]> 
   }
 
   // Also query Polymarket data in parallel
-  const polySignerPromise = getPolymarketSignerBalance().catch(() => 0);
+  const polySignerPromise = getPolymarketSignerBalance().catch(() => null);
   const profilePromise = getPolymarketProfile().catch(() => null);
 
   const [chainResults, polySignerBalance, profile] = await Promise.all([
@@ -172,9 +174,9 @@ export async function getAllBalances(address: string): Promise<BalanceResult[]> 
   }
 
   // Polymarket internal balance (deposit wallet / POLY_1271)
-  if (polySignerBalance > 0) {
+  if (polySignerBalance !== null) {
     const pUsdBalance = polySignerBalance / 1_000_000;
-    results.push({ chain: 'polymarket', symbol: 'pUSD', balance: pUsdBalance });
+    results.push({ chain: 'polymarket', symbol: 'pUSD', balance: pUsdBalance, success: true });
   }
 
   // Polymarket portfolio value (from data API, uses proxy wallet)
@@ -182,7 +184,7 @@ export async function getAllBalances(address: string): Promise<BalanceResult[]> 
     try {
       const portfolioValue = await getPolymarketPortfolioValue(profile.proxyWallet);
       if (portfolioValue > 0) {
-        results.push({ chain: 'polymarket', symbol: 'Portfolio', balance: portfolioValue });
+        results.push({ chain: 'polymarket', symbol: 'Portfolio', balance: portfolioValue, success: true });
       }
     } catch {
       // ignore
@@ -338,24 +340,41 @@ export async function syncChainBalance(address: string, chainBalance: number): P
 }
 
 // Sync on-chain balance to database
+// 链上余额是真值，本地 balance_usdc 只是缓存，始终与链上保持一致
 export async function syncOnChainBalance(address: string): Promise<{ chainBalance: number; dbBalance: number; details?: BalanceResult[] }> {
   const balances = await getAllBalances(address);
 
-  // Prefer pUSD (Polymarket internal CLOB balance) as the main tradeable balance
+  // 检查是否有任何查询成功
+  const anySuccess = balances.some(b => b.success);
+  if (!anySuccess) {
+    console.warn('[Balance] 所有余额查询失败，跳过数据库更新，保留现有余额');
+    const wallet = await getWallet(address);
+    const dbBalance = wallet ? parseFloat(wallet.balance_usdc) : 0;
+    return { chainBalance: dbBalance, dbBalance, details: balances };
+  }
+
   const pUsd = balances.find(b => b.chain === 'polymarket' && b.symbol === 'pUSD');
-  // Fall back to max on-chain USDC/USDT balance
+
+  // 用户配置了私钥（使用 Polymarket）但 pUSD 查询失败时，
+  // 不能回退到链上 USDC（用户资金在 Polymarket 内部，链上 USDC=0 是正常的）
+  if (config.privateKey && !pUsd) {
+    console.warn('[Balance] pUSD 查询失败（CLOB API 不可用），跳过数据库更新，保留现有余额');
+    const wallet = await getWallet(address);
+    const dbBalance = wallet ? parseFloat(wallet.balance_usdc) : 0;
+    return { chainBalance: dbBalance, dbBalance, details: balances };
+  }
+
   const usdcBalances = balances.filter(b =>
     (b.symbol === 'USDC' || b.symbol === 'USDC.e' || b.symbol === 'USDT') && b.balance > 0
   );
   const onChainUsdc = usdcBalances.length > 0 ? Math.max(...usdcBalances.map(b => b.balance)) : 0;
   const chainBalance = pUsd ? pUsd.balance : onChainUsdc;
 
-  if (chainBalance >= 0) {
-    await pool.execute(
-      `UPDATE soccer_wallets SET chain_balance = ?, balance_usdc = ?, last_sync_at = NOW() WHERE wallet_address = ?`,
-      [chainBalance, chainBalance, address],
-    );
-  }
+  await pool.execute(
+    `UPDATE soccer_wallets SET chain_balance = ?, balance_usdc = ?, last_sync_at = NOW() WHERE wallet_address = ?`,
+    [chainBalance, chainBalance, address],
+  );
+
   const wallet = await getWallet(address);
   return {
     chainBalance,

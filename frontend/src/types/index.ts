@@ -87,3 +87,72 @@ export interface WsMessage {
   best_bid?: number | string
   best_ask?: number | string
 }
+
+// ---- Sports API (bzzoiro) types ----
+
+export interface SportsTeam {
+  id: number
+  name: string
+  short_name?: string
+}
+
+export interface SportsLeague {
+  id: number
+  name: string
+  country?: string
+}
+
+export interface SportsLiveEvent {
+  id: number
+  home_team: SportsTeam
+  away_team: SportsTeam
+  league: SportsLeague
+  home_score: number
+  away_score: number
+  status: 'notstarted' | 'inprogress' | 'finished' | 'cancelled' | string
+  start_time: string
+  minute?: number | null
+  period?: string | null
+  has_prediction?: boolean
+  home_score_ht?: number
+  away_score_ht?: number
+  current_minute?: number
+  live_websocket?: boolean
+  has_xg?: boolean
+  weather?: string | null
+  attendance?: number | null
+  venue?: string | null
+  [key: string]: unknown
+}
+
+export interface SportsStats {
+  home?: Record<string, any>
+  away?: Record<string, any>
+  [key: string]: unknown
+}
+
+export interface SportsIncident {
+  id?: number
+  type?: string
+  minute?: number
+  team?: 'home' | 'away' | string
+  player?: string
+  player_id?: number
+  assist_player?: string
+  assist_player_id?: number
+  [key: string]: unknown
+}
+
+export interface SportsLineups {
+  home?: {
+    lineup?: Array<Record<string, any>>
+    substitutes?: Array<Record<string, any>>
+    coach?: string
+  }
+  away?: {
+    lineup?: Array<Record<string, any>>
+    substitutes?: Array<Record<string, any>>
+    coach?: string
+  }
+  [key: string]: unknown
+}

@@ -80,8 +80,8 @@ export function getOutcomeColor(
   total: number,
 ): string {
   const lower = String(name).toLowerCase()
-  if (lower === 'yes' || lower === '是') return 'var(--pm-state-success)'
-  if (lower === 'no' || lower === '否') return 'var(--pm-state-error)'
+  if (lower === 'yes' || lower.endsWith('是')) return 'var(--pm-state-success)'
+  if (lower === 'no' || lower.endsWith('否')) return 'var(--pm-state-error)'
   if (total === 2) {
     return idx === 0 ? 'var(--pm-state-success)' : 'var(--pm-state-error)'
   }
@@ -99,6 +99,9 @@ export function getOutcomeRoundedClass(idx: number, total: number): string {
     if (idx === 0) return 'rounded-l-md'
     if (idx === 2) return 'rounded-r-md'
     return ''
+  }
+  if (total === 6) {
+    return idx % 2 === 0 ? 'rounded-l-md' : 'rounded-r-md'
   }
   return 'rounded-md'
 }
@@ -149,21 +152,31 @@ export function mergeMoneylineMarkets(
     question_zh: '主胜 / 平 / 客胜',
     market_type: 'moneyline',
     line: null,
-    outcomes: [homeName, '平局', awayName],
+    outcomes: [
+      `${homeName} 是`, `${homeName} 否`,
+      '平局 是', '平局 否',
+      `${awayName} 是`, `${awayName} 否`,
+    ],
     outcome_prices: [
       homeMarket.outcome_prices?.[0] ?? 0,
+      homeMarket.outcome_prices?.[1] ?? 0,
       drawMarket?.outcome_prices?.[0] ?? 0,
+      drawMarket?.outcome_prices?.[1] ?? 0,
       awayMarket.outcome_prices?.[0] ?? 0,
+      awayMarket.outcome_prices?.[1] ?? 0,
     ],
     clob_token_ids: [
       homeMarket.clob_token_ids?.[0] ?? null,
+      homeMarket.clob_token_ids?.[1] ?? null,
       drawMarket?.clob_token_ids?.[0] ?? null,
+      drawMarket?.clob_token_ids?.[1] ?? null,
       awayMarket.clob_token_ids?.[0] ?? null,
+      awayMarket.clob_token_ids?.[1] ?? null,
     ],
     source_market_ids: [
-      homeMarket.id,
-      drawMarket?.id ?? null,
-      awayMarket.id,
+      homeMarket.id, homeMarket.id,
+      drawMarket?.id ?? null, drawMarket?.id ?? null,
+      awayMarket.id, awayMarket.id,
     ],
   }
 

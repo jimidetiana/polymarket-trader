@@ -6,7 +6,7 @@ import {
   ClobClient as V2ClobClient,
   SignatureTypeV2,
   AssetType,
-  type ApiCreds,
+  type ApiKeyCreds,
 } from '@polymarkets/clob-client-v2';
 import { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { config } from '../config.js';
@@ -14,7 +14,7 @@ import { getOrCreateClobCredentials } from '../auth.js';
 import { getPublicProfile } from '../gamma.js';
 
 let v2Client: V2ClobClient | null = null;
-let v2Creds: ApiCreds | null = null;
+let v2Creds: ApiKeyCreds | null = null;
 let v2FunderAddress: string | undefined;
 
 function createProxyTransport(): ReturnType<typeof http> {
@@ -71,7 +71,7 @@ export async function getV2Client(): Promise<V2ClobClient> {
   return v2Client;
 }
 
-export async function getV2Creds(): Promise<ApiCreds> {
+export async function getV2Creds(): Promise<ApiKeyCreds> {
   if (v2Creds) return v2Creds;
 
   const client = await getV2Client();
@@ -83,7 +83,11 @@ export async function getV2Creds(): Promise<ApiCreds> {
       passphrase: config.credentials.passphrase,
     };
   } else {
-    v2Creds = await client.createOrDeriveApiKey();
+    const derived = await client.createOrDeriveApiKey();
+    if (!derived?.key || !derived?.secret || !derived?.passphrase) {
+      throw new Error('CLOB API 返回的 API Key 无效（可能服务端故障）');
+    }
+    v2Creds = derived;
     console.log('[V2 CLOB] Derived API Key:', v2Creds.key);
   }
 
