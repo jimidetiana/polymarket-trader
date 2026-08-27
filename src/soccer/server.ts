@@ -65,6 +65,9 @@ import {
   listRules,
   listTriggers,
   listLogs,
+  listConnectionEvents,
+  getConnectionStats,
+  getConnectionState,
 } from '../bots/price-bot/price-bot.js';
 import { config } from '../config.js';
 
@@ -1450,6 +1453,25 @@ app.get('/api/bots/price-bot/logs', asyncHandler(async (req, res) => {
     action: action as string | undefined,
   });
   res.json({ success: true, ...result });
+}));
+
+// WebSocket 连接事件（断联/重连样本，用于分析断联与进球的相关性）
+app.get('/api/bots/price-bot/connection/events', asyncHandler(async (req, res) => {
+  const { limit, offset, eventType, reason, tokenId } = req.query;
+  const result = await listConnectionEvents({
+    limit: limit ? Number(limit) : 100,
+    offset: offset ? Number(offset) : 0,
+    eventType: eventType as 'disconnect' | 'reconnect' | undefined,
+    reason: reason as string | undefined,
+    tokenId: tokenId as string | undefined,
+  });
+  res.json({ success: true, ...result });
+}));
+
+// 断联统计汇总
+app.get('/api/bots/price-bot/connection/stats', asyncHandler(async (_req, res) => {
+  const stats = await getConnectionStats();
+  res.json({ success: true, stats, current: getConnectionState() });
 }));
 
 // Static frontend in production/service mode; dev mode keeps API only.

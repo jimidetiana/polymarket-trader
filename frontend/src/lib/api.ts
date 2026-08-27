@@ -866,7 +866,16 @@ export interface PriceMonitorState {
   lastPrice: number | null
 }
 
-export interface PriceTriggerRecord {
+/** 日志/触发记录 LEFT JOIN 带出的赛事与盘口信息，均可能缺失 */
+export interface MatchContext {
+  matchName?: string
+  league?: string
+  marketName?: string
+  marketType?: string
+  line?: number
+}
+
+export interface PriceTriggerRecord extends MatchContext {
   id?: number
   botId: string
   ruleId: number
@@ -884,13 +893,13 @@ export interface PriceTriggerRecord {
   triggeredAt?: string
 }
 
-export interface PriceBotLog {
+export interface PriceBotLog extends MatchContext {
   id?: number
   ruleId: number
   tokenId: string
   eventId: string
   outcome: string
-  action: 'start' | 'stop' | 'price_update' | 'trigger'
+  action: 'start' | 'stop' | 'price_update' | 'trigger' | 'disconnect' | 'reconnect'
   price: number | null
   detail: string | null
   loggedAt?: string
@@ -1007,10 +1016,11 @@ export async function fetchPriceBotTriggers(params?: {
   if (params?.ruleId) qs.set('ruleId', String(params.ruleId))
   if (params?.eventId) qs.set('eventId', params.eventId)
   if (params?.tokenId) qs.set('tokenId', params.tokenId)
-  const data = await request<{ triggers: PriceTriggerRecord[]; total: number }>(
+  // 后端 listTriggers 返回的字段名是 records
+  const data = await request<{ records: PriceTriggerRecord[]; total: number }>(
     `/api/bots/price-bot/triggers?${qs}`,
   )
-  return { triggers: data.triggers, total: data.total }
+  return { triggers: data.records ?? [], total: data.total ?? 0 }
 }
 
 export async function fetchPriceBotLogs(params?: {
@@ -1029,6 +1039,6 @@ export async function fetchPriceBotLogs(params?: {
   const data = await request<{ logs: PriceBotLog[]; total: number }>(
     `/api/bots/price-bot/logs?${qs}`,
   )
-  return { logs: data.logs, total: data.total }
+  return { logs: data.logs ?? [], total: data.total ?? 0 }
 }
 

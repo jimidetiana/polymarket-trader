@@ -25,6 +25,7 @@ import {
   type PriceMonitorState,
   type PriceTriggerRecord,
   type PriceBotLog,
+  type MatchContext,
 } from '@/lib/api'
 
 type Tab = 'rules' | 'monitors' | 'triggers' | 'logs'
@@ -52,6 +53,60 @@ const ACTION_LABELS: Record<string, { label: string; className: string; icon: ty
   stop: { label: '停止', className: 'bg-red-500/10 text-red-600 border-red-500/30', icon: Pause },
   trigger: { label: '触发', className: 'bg-blue-500/10 text-blue-600 border-blue-500/30', icon: Zap },
   price_update: { label: '价格', className: 'bg-gray-500/10 text-gray-600 border-gray-500/30', icon: TrendingUp },
+  disconnect: { label: '断联', className: 'bg-orange-500/10 text-orange-600 border-orange-500/30', icon: Pause },
+  reconnect: { label: '重连', className: 'bg-cyan-500/10 text-cyan-600 border-cyan-500/30', icon: Play },
+}
+
+/**
+ * 价格/百分比格式化。
+ *
+ * 后端字段理论上都有值，但一旦某条记录缺字段，
+ * 直接调 .toFixed() 会抛错并让整个页面白屏，所以统一做空值防护。
+ */
+function fmtPrice(v: number | null | undefined): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(4) : '—'
+}
+
+function fmtPercent(v: number | null | undefined): string {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '—'
+  return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`
+}
+
+/**
+ * 比赛与盘口标签。
+ *
+ * 后端 LEFT JOIN 带出 matchName / marketName / league / line，
+ * 让日志和触发记录能直接看出是哪场比赛的哪个盘口，而不只是一串 token_id。
+ */
+function MatchLabel({
+  ctx,
+  outcome,
+}: {
+  ctx: MatchContext
+  outcome?: string
+}) {
+  if (!ctx.matchName && !ctx.marketName) {
+    return outcome ? <span className="text-muted-foreground">{outcome}</span> : null
+  }
+
+  // 盘口名通常已含「主队 vs. 客队: O/U 3.5」，此时不再重复比赛名
+  const marketSuffix = ctx.marketName?.includes(' vs')
+    ? ctx.marketName.split(':').slice(1).join(':').trim()
+    : ctx.marketName
+
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      {ctx.matchName && (
+        <span className="truncate font-medium text-foreground/90">{ctx.matchName}</span>
+      )}
+      {marketSuffix && (
+        <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+          {marketSuffix}
+        </span>
+      )}
+      {outcome && <span className="shrink-0 text-muted-foreground">{outcome}</span>}
+    </span>
+  )
 }
 
 export default function PriceBotPage() {
@@ -893,19 +948,18 @@ function TriggersTab({
             </span>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 text-xs">
-                <span className="font-medium">{RULE_TYPE_LABELS[t.ruleType] ?? t.ruleType}</span>
-                <span className="text-muted-foreground">{DIRECTION_LABELS[t.direction] ?? t.direction}</span>
-                <span className="text-muted-foreground">{t.outcome}</span>
+                <MatchLabel ctx={t} outcome={t.outcome} />
               </div>
               <div className="mt-0.5 flex items-center gap-3 text-[10px] text-muted-foreground">
-                <span>
-                  {t.previousPrice.toFixed(4)} → {t.currentPrice.toFixed(4)}
+                <span className="shrink-0">{RULE_TYPE_LABELS[t.ruleType] ?? t.ruleType}</span>
+                <span className="shrink-0">{DIRECTION_LABELS[t.direction] ?? t.direction}</span>
+                <span className="shrink-0 font-mono">
+                  {fmtPrice(t.previousPrice)} → {fmtPrice(t.currentPrice)}
                 </span>
-                <span className={cn('flex items-center gap-0.5', isUp ? 'text-green-600' : 'text-red-600')}>
+                <span className={cn('flex shrink-0 items-center gap-0.5', isUp ? 'text-green-600' : 'text-red-600')}>
                   {isUp ? <TrendingUp className="h-2.5 w-2.5" /> : <TrendingDown className="h-2.5 w-2.5" />}
-                  {t.changePercent >= 0 ? '+' : ''}{(t.changePercent * 100).toFixed(2)}%
+                  {fmtPercent(t.changePercent)}
                 </span>
-                <span>阈值: {t.threshold}</span>
               </div>
             </div>
             {t.triggeredAt && (
@@ -952,14 +1006,13 @@ function LogsTab({
             </span>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 text-xs">
-                <span className="font-medium">{rule ? RULE_TYPE_LABELS[rule.ruleType] ?? rule.ruleType : `规则#${log.ruleId}`}</span>
-                {rule && <span className="text-muted-foreground">{rule.outcome}</span>}
-                {log.outcome && !rule && <span className="text-muted-foreground">{log.outcome}</span>}
+                <MatchLabel ctx={log} outcome={log.outcome || rule?.outcome} />
               </div>
               <div className="mt-0.5 flex items-center gap-3 text-[10px] text-muted-foreground">
+                <span className="shrink-0">规则#{log.ruleId}</span>
                 {log.price != null && (
-                  <span className="font-mono text-foreground/80">
-                    {log.price.toFixed(4)}
+                  <span className="shrink-0 font-mono text-foreground/80">
+                    {fmtPrice(log.price)}
                   </span>
                 )}
                 {log.detail && (

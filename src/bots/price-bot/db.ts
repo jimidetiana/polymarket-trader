@@ -5,11 +5,36 @@
  */
 
 import { pool } from '../../soccer/db.js'
-import type { PriceMonitorRule, PriceTriggerRecord, PriceBotLog } from './types.js'
+import type {
+  PriceMonitorRule,
+  PriceTriggerRecord,
+  PriceBotLog,
+  PriceBotConnectionEvent,
+} from './types.js'
 
 // ==================== 表结构 ====================
 
-export async function ensureTables(): Promise<void> {
+/**
+ * 建表只需跑一次。
+ *
+ * ensureTables 被每个 db 函数调用，而价格采样会高频写入，
+ * 每次都执行建表 + INFORMATION_SCHEMA 查询是不必要的开销。
+ * 缓存 promise 而非布尔值，避免并发首次调用重复建表。
+ */
+let ensureTablesPromise: Promise<void> | null = null
+
+export function ensureTables(): Promise<void> {
+  if (!ensureTablesPromise) {
+    ensureTablesPromise = doEnsureTables().catch((err) => {
+      // 失败时清空缓存，下次调用可重试
+      ensureTablesPromise = null
+      throw err
+    })
+  }
+  return ensureTablesPromise
+}
+
+async function doEnsureTables(): Promise<void> {
   await pool.execute(`
     CREATE TABLE IF NOT EXISTS price_bot_rules (
       id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -67,15 +92,101 @@ export async function ensureTables(): Promise<void> {
       token_id VARCHAR(200) NOT NULL,
       event_id VARCHAR(100) NOT NULL,
       outcome VARCHAR(100) NOT NULL,
-      action VARCHAR(20) NOT NULL COMMENT 'start/stop/price_update/trigger',
+      action VARCHAR(20) NOT NULL COMMENT 'start/stop/price_update/trigger/disconnect/reconnect',
       price DECIMAL(8,4) DEFAULT NULL,
+      best_bid DECIMAL(8,4) DEFAULT NULL,
+      best_bid_size DECIMAL(18,4) DEFAULT NULL,
+      best_ask DECIMAL(8,4) DEFAULT NULL,
+      best_ask_size DECIMAL(18,4) DEFAULT NULL,
+      source VARCHAR(10) DEFAULT NULL COMMENT 'ws/rest',
       detail TEXT DEFAULT NULL,
       logged_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       KEY idx_rule (rule_id),
       KEY idx_time (logged_at),
-      KEY idx_event (event_id)
+      KEY idx_event (event_id),
+      KEY idx_rule_action_time (rule_id, action, logged_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
+
+  // 已存在的表需要补列（CREATE TABLE IF NOT EXISTS 不会修改现有表结构）
+  await ensureLogColumns()
+
+  // 连接事件表：记录 WS 断开/重连，用于验证断联与进球的相关性
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS price_bot_connection_events (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      bot_id VARCHAR(50) NOT NULL,
+      event_type VARCHAR(20) NOT NULL COMMENT 'disconnect/reconnect',
+      reason VARCHAR(40) NOT NULL COMMENT 'ws_close/pong_timeout/ws_error/resubscribe',
+      close_code INT DEFAULT NULL,
+      downtime_ms INT DEFAULT NULL,
+      subscribed_tokens INT NOT NULL DEFAULT 0,
+      token_id VARCHAR(200) DEFAULT NULL,
+      price_before DECIMAL(8,4) DEFAULT NULL,
+      price_after DECIMAL(8,4) DEFAULT NULL,
+      price_delta DECIMAL(8,4) DEFAULT NULL,
+      detail TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_bot (bot_id),
+      KEY idx_type (event_type),
+      KEY idx_time (created_at),
+      KEY idx_reason (reason)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+}
+
+/**
+ * 为已存在的 price_bot_logs 表补充盘口列。
+ *
+ * CREATE TABLE IF NOT EXISTS 对已存在的表完全不生效，
+ * 所以升级时必须显式 ADD COLUMN。按列名逐个检查，可重复执行。
+ */
+async function ensureLogColumns(): Promise<void> {
+  const [cols] = await pool.execute<any[]>(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'price_bot_logs'`,
+  )
+  const existing = new Set(cols.map((c) => String(c.COLUMN_NAME)))
+
+  const additions: Array<[string, string]> = [
+    ['best_bid', 'DECIMAL(8,4) DEFAULT NULL'],
+    ['best_bid_size', 'DECIMAL(18,4) DEFAULT NULL'],
+    ['best_ask', 'DECIMAL(8,4) DEFAULT NULL'],
+    ['best_ask_size', 'DECIMAL(18,4) DEFAULT NULL'],
+    ['source', "VARCHAR(10) DEFAULT NULL COMMENT 'ws/rest'"],
+  ]
+
+  for (const [name, ddl] of additions) {
+    if (existing.has(name)) continue
+    try {
+      await pool.execute(`ALTER TABLE price_bot_logs ADD COLUMN ${name} ${ddl}`)
+      console.log(`[PriceBot] price_bot_logs 补充列: ${name}`)
+    } catch (err: any) {
+      // 并发启动时可能已被其他连接加上，忽略重复列错误
+      if (!/duplicate column/i.test(err.message || '')) {
+        console.error(`[PriceBot] 补充列 ${name} 失败:`, err.message)
+      }
+    }
+  }
+
+  // 价格采样量大，补一个 (rule_id, action, logged_at) 复合索引加速查询
+  const [idx] = await pool.execute<any[]>(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'price_bot_logs'
+       AND INDEX_NAME = 'idx_rule_action_time'`,
+  )
+  if (idx.length === 0) {
+    try {
+      await pool.execute(
+        `ALTER TABLE price_bot_logs ADD INDEX idx_rule_action_time (rule_id, action, logged_at)`,
+      )
+      console.log('[PriceBot] price_bot_logs 补充索引: idx_rule_action_time')
+    } catch (err: any) {
+      if (!/duplicate key name/i.test(err.message || '')) {
+        console.error('[PriceBot] 补充索引失败:', err.message)
+      }
+    }
+  }
 }
 
 // ==================== 规则 CRUD ====================
@@ -241,30 +352,41 @@ export async function listTriggers(options: {
   const params: any[] = []
 
   if (options.ruleId) {
-    where.push('rule_id = ?')
+    where.push('t.rule_id = ?')
     params.push(options.ruleId)
   }
   if (options.tokenId) {
-    where.push('token_id = ?')
+    where.push('t.token_id = ?')
     params.push(options.tokenId)
   }
   if (options.eventId) {
-    where.push('event_id = ?')
+    where.push('t.event_id = ?')
     params.push(options.eventId)
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
   const [countRows] = await pool.execute<any[]>(
-    `SELECT COUNT(*) as total FROM price_bot_triggers ${whereSql}`,
+    `SELECT COUNT(*) as total FROM price_bot_triggers t ${whereSql}`,
     params,
   )
   const total = countRows[0]?.total ?? 0
 
   const limit = Math.max(1, Math.min(1000, Math.floor(Number(options.limit) ?? 50)))
   const offset = Math.max(0, Math.floor(Number(options.offset) ?? 0))
+
+  // 关联赛事与盘口，让触发记录能直接看出「哪场比赛、哪个盘口」
   const [rows] = await pool.execute<any[]>(
-    `SELECT * FROM price_bot_triggers ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
+    `SELECT t.*,
+            e.home_team_zh, e.away_team_zh,
+            e.home_team_en, e.away_team_en,
+            e.league,
+            m.question_zh, m.question_en, m.market_type, m.line
+       FROM price_bot_triggers t
+       LEFT JOIN soccer_events e ON e.id = t.event_id
+       LEFT JOIN soccer_markets m ON m.id = t.market_id
+     ${whereSql}
+     ORDER BY t.id DESC LIMIT ${limit} OFFSET ${offset}`,
     params,
   )
 
@@ -317,22 +439,126 @@ export async function listLogs(options: {
   const params: any[] = []
 
   if (options.ruleId) {
-    where.push('rule_id = ?')
+    where.push('l.rule_id = ?')
     params.push(options.ruleId)
   }
   if (options.eventId) {
-    where.push('event_id = ?')
+    where.push('l.event_id = ?')
     params.push(options.eventId)
   }
   if (options.action) {
-    where.push('action = ?')
+    where.push('l.action = ?')
     params.push(options.action)
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
   const [countRows] = await pool.execute<any[]>(
-    `SELECT COUNT(*) as total FROM price_bot_logs ${whereSql}`,
+    `SELECT COUNT(*) as total FROM price_bot_logs l ${whereSql}`,
+    params,
+  )
+  const total = countRows[0]?.total ?? 0
+
+  const limit = Math.max(1, Math.min(1000, Math.floor(Number(options.limit) ?? 100)))
+  const offset = Math.max(0, Math.floor(Number(options.offset) ?? 0))
+
+  // 关联赛事与盘口，让日志能直接看出「哪场比赛、哪个盘口」。
+  // 用 LEFT JOIN：赛事数据可能已被清理，日志本身仍要能查出来。
+  const [rows] = await pool.execute<any[]>(
+    `SELECT l.*,
+            e.home_team_zh, e.away_team_zh,
+            e.home_team_en, e.away_team_en,
+            e.league,
+            m.question_zh, m.question_en, m.market_type, m.line
+       FROM price_bot_logs l
+       LEFT JOIN price_bot_rules r ON r.id = l.rule_id
+       LEFT JOIN soccer_events e ON e.id = l.event_id
+       LEFT JOIN soccer_markets m ON m.id = r.market_id
+     ${whereSql}
+     ORDER BY l.id DESC LIMIT ${limit} OFFSET ${offset}`,
+    params,
+  )
+
+  const logs = rows.map(rowToLog)
+  return { logs, total }
+}
+
+// ==================== 连接事件 CRUD ====================
+
+export async function recordConnectionEvent(
+  event: Omit<PriceBotConnectionEvent, 'id' | 'createdAt'>,
+): Promise<number> {
+  await ensureTables()
+  const [result] = await pool.execute<any>(
+    `INSERT INTO price_bot_connection_events
+       (bot_id, event_type, reason, close_code, downtime_ms, subscribed_tokens,
+        price_before, price_after, price_delta, token_id, detail)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      event.botId,
+      event.eventType,
+      event.reason,
+      event.closeCode ?? null,
+      event.downtimeMs ?? null,
+      event.subscribedTokens,
+      event.priceBefore ?? null,
+      event.priceAfter ?? null,
+      event.priceDelta ?? null,
+      event.tokenId ?? null,
+      event.detail ?? null,
+    ],
+  )
+  return Number(result.insertId)
+}
+
+/**
+ * 补写重连事件的重连后价格。
+ *
+ * 重连事件在 WS open 时就落库，但那一刻 initial_dump 还没到，
+ * price_after 只能等首个价格推送到达后回填。
+ */
+export async function updateConnectionEventPrice(
+  id: number,
+  priceAfter: number,
+): Promise<void> {
+  await pool.execute(
+    `UPDATE price_bot_connection_events
+     SET price_after = ?,
+         price_delta = CASE WHEN price_before IS NULL THEN NULL ELSE ? - price_before END
+     WHERE id = ?`,
+    [priceAfter, priceAfter, id],
+  )
+}
+
+export async function listConnectionEvents(options: {
+  eventType?: string
+  reason?: string
+  tokenId?: string
+  limit?: number
+  offset?: number
+} = {}): Promise<{ events: PriceBotConnectionEvent[]; total: number }> {
+  await ensureTables()
+
+  const where: string[] = []
+  const params: any[] = []
+
+  if (options.eventType) {
+    where.push('event_type = ?')
+    params.push(options.eventType)
+  }
+  if (options.reason) {
+    where.push('reason = ?')
+    params.push(options.reason)
+  }
+  if (options.tokenId) {
+    where.push('token_id = ?')
+    params.push(options.tokenId)
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+  const [countRows] = await pool.execute<any[]>(
+    `SELECT COUNT(*) as total FROM price_bot_connection_events ${whereSql}`,
     params,
   )
   const total = countRows[0]?.total ?? 0
@@ -340,12 +566,69 @@ export async function listLogs(options: {
   const limit = Math.max(1, Math.min(1000, Math.floor(Number(options.limit) ?? 100)))
   const offset = Math.max(0, Math.floor(Number(options.offset) ?? 0))
   const [rows] = await pool.execute<any[]>(
-    `SELECT * FROM price_bot_logs ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
+    `SELECT * FROM price_bot_connection_events ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
     params,
   )
 
-  const logs = rows.map(rowToLog)
-  return { logs, total }
+  return { events: rows.map(rowToConnectionEvent), total }
+}
+
+/**
+ * 断联统计汇总：用于回答「断联是否与进球相关」。
+ *
+ * 按断开原因分组统计次数、平均/最大断联时长，以及重连后价格跳变幅度。
+ * 若进球引起的断联确实存在，应表现为 ws_close/pong_timeout 类别下
+ * 出现明显大于其他类别的 |price_delta|。
+ */
+export async function getConnectionStats(): Promise<{
+  byReason: Array<{
+    reason: string
+    count: number
+    avgDowntimeMs: number | null
+    maxDowntimeMs: number | null
+    avgAbsPriceDelta: number | null
+    maxAbsPriceDelta: number | null
+  }>
+  totalDisconnects: number
+  totalReconnects: number
+}> {
+  await ensureTables()
+
+  const [rows] = await pool.execute<any[]>(
+    `SELECT reason,
+            COUNT(*) AS count,
+            AVG(downtime_ms) AS avg_downtime,
+            MAX(downtime_ms) AS max_downtime,
+            AVG(ABS(price_delta)) AS avg_abs_delta,
+            MAX(ABS(price_delta)) AS max_abs_delta
+       FROM price_bot_connection_events
+      WHERE event_type = 'reconnect'
+      GROUP BY reason
+      ORDER BY count DESC`,
+  )
+
+  const [totals] = await pool.execute<any[]>(
+    `SELECT event_type, COUNT(*) AS c FROM price_bot_connection_events GROUP BY event_type`,
+  )
+  let totalDisconnects = 0
+  let totalReconnects = 0
+  for (const t of totals) {
+    if (t.event_type === 'disconnect') totalDisconnects = Number(t.c)
+    if (t.event_type === 'reconnect') totalReconnects = Number(t.c)
+  }
+
+  return {
+    byReason: rows.map((r) => ({
+      reason: String(r.reason),
+      count: Number(r.count),
+      avgDowntimeMs: r.avg_downtime != null ? Number(r.avg_downtime) : null,
+      maxDowntimeMs: r.max_downtime != null ? Number(r.max_downtime) : null,
+      avgAbsPriceDelta: r.avg_abs_delta != null ? Number(r.avg_abs_delta) : null,
+      maxAbsPriceDelta: r.max_abs_delta != null ? Number(r.max_abs_delta) : null,
+    })),
+    totalDisconnects,
+    totalReconnects,
+  }
 }
 
 // ==================== 行映射 ====================
@@ -371,6 +654,32 @@ function rowToRule(row: any): PriceMonitorRule {
   }
 }
 
+/**
+ * 从 JOIN 出来的赛事/盘口列拼出可读标签。
+ *
+ * 日志和触发记录原本只有 token_id 和 outcome，看不出是哪场比赛的哪个盘口。
+ * 这里补上「主队 vs 客队」和盘口名，中文优先、英文兜底。
+ */
+function extractContext(row: any): {
+  matchName?: string
+  league?: string
+  marketName?: string
+  marketType?: string
+  line?: number
+} {
+  const home = row.home_team_zh || row.home_team_en
+  const away = row.away_team_zh || row.away_team_en
+  const matchName = home && away ? `${home} vs ${away}` : undefined
+
+  return {
+    matchName,
+    league: row.league ? String(row.league) : undefined,
+    marketName: row.question_zh || row.question_en || undefined,
+    marketType: row.market_type ? String(row.market_type) : undefined,
+    line: row.line != null ? Number(row.line) : undefined,
+  }
+}
+
 function rowToTrigger(row: any): PriceTriggerRecord {
   return {
     id: Number(row.id),
@@ -388,6 +697,7 @@ function rowToTrigger(row: any): PriceTriggerRecord {
     threshold: Number(row.threshold),
     signalType: String(row.signal_type),
     triggeredAt: row.triggered_at ? String(row.triggered_at) : undefined,
+    ...extractContext(row),
   }
 }
 
@@ -402,5 +712,24 @@ function rowToLog(row: any): PriceBotLog {
     price: row.price != null ? Number(row.price) : null,
     detail: row.detail ? String(row.detail) : null,
     loggedAt: row.logged_at ? String(row.logged_at) : undefined,
+    ...extractContext(row),
+  }
+}
+
+function rowToConnectionEvent(row: any): PriceBotConnectionEvent {
+  return {
+    id: Number(row.id),
+    botId: String(row.bot_id),
+    eventType: row.event_type as any,
+    reason: String(row.reason),
+    closeCode: row.close_code != null ? Number(row.close_code) : null,
+    downtimeMs: row.downtime_ms != null ? Number(row.downtime_ms) : null,
+    subscribedTokens: Number(row.subscribed_tokens ?? 0),
+    priceBefore: row.price_before != null ? Number(row.price_before) : null,
+    priceAfter: row.price_after != null ? Number(row.price_after) : null,
+    priceDelta: row.price_delta != null ? Number(row.price_delta) : null,
+    tokenId: row.token_id ? String(row.token_id) : null,
+    detail: row.detail ? String(row.detail) : null,
+    createdAt: row.created_at ? String(row.created_at) : undefined,
   }
 }
