@@ -54,6 +54,7 @@ import {
   updateConfig as updatePriceBotConfig,
   triggerCycle as triggerPriceBotCycle,
   startMonitor,
+  startMonitors,
   stopMonitor,
   getMonitorList,
   getMonitor,
@@ -1508,6 +1509,27 @@ app.get('/api/bots/price-bot/monitors/:ruleId', asyncHandler(async (req, res) =>
     return;
   }
   res.json({ success: true, monitor });
+}));
+
+// 批量启动：必须在 /monitors/:ruleId/start 之前注册，
+// 否则 "batch-start" 会被当成 :ruleId 参数吃掉。
+// 单独建端点而非让前端循环调用单条启动接口：
+// 每次 startMonitor 都会重建 WS 连接并触发一次高波动抑制窗口。
+app.post('/api/bots/price-bot/monitors/batch-start', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const rawIds: unknown = body.ruleIds;
+
+  let ruleIds: number[];
+  if (Array.isArray(rawIds)) {
+    ruleIds = rawIds.map(Number).filter((n) => Number.isFinite(n));
+  } else {
+    // 未指定则启动全部已启用规则
+    const { rules } = await listRules({ enabledOnly: true });
+    ruleIds = rules.map((r) => r.id).filter((id): id is number => id !== undefined);
+  }
+
+  const result = await startMonitors(ruleIds);
+  res.json({ success: true, ...result, monitors: getMonitorList() });
 }));
 
 app.post('/api/bots/price-bot/monitors/:ruleId/start', asyncHandler(async (req, res) => {

@@ -77,9 +77,14 @@ export const DEFAULT_CONFIG: PriceBotConfig = {
   sampleFlushIntervalMs: 2_000,
   autoTradeEnabled: false,
   goalSurgeDefaults: {
-    surgeWindowMs: 3_000,
-    surgeMinRise: 0.03,
+    // 窗口从 3s 放宽到 8s：实测进球后价格常呈阶梯式上行，
+    // 3s 窗口只能吃到其中一段，净涨因此达不到阈值。
+    surgeWindowMs: 8_000,
+    // 净涨从 0.03 降到 0.02：配合 8s 窗口，覆盖「分两三跳累积上行」的形态。
+    surgeMinRise: 0.02,
     jumpThreshold: 0.05,
+    // 买单量门槛保留 50 作为「已知量时」的判据；
+    // 实测 98% 的 WS 采样不带 size，缺量时不再阻断（见 stepGoalSurge）。
     minBidSize: 50,
     minAskSize: 50,
     askCeiling: 0.97,

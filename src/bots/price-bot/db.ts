@@ -265,13 +265,14 @@ export async function listRules(options: {
     `SELECT r.*,
             e.home_team_zh, e.away_team_zh,
             e.home_team_en, e.away_team_en,
-            e.league, e.end_time,
+            e.league, e.start_time, e.end_time,
             m.question_zh, m.question_en, m.market_type, m.line
        FROM price_bot_rules r
        LEFT JOIN soccer_events e ON e.id = r.event_id
        LEFT JOIN soccer_markets m ON m.id = r.market_id
      ${whereSql}
-     ORDER BY r.id DESC LIMIT ${limit} OFFSET ${offset}`,
+     ORDER BY e.start_time IS NULL, e.start_time ASC, r.id DESC
+     LIMIT ${limit} OFFSET ${offset}`,
     params,
   )
 
@@ -461,7 +462,7 @@ export async function getLastTriggerTime(ruleId: number): Promise<string | null>
   )
   if (!rows.length) return null
   const t = rows[0].triggered_at
-  return t instanceof Date ? t.toISOString() : String(t)
+  return toIsoUtc(t) ?? null
 }
 
 // ==================== 日志 CRUD ====================
@@ -742,6 +743,26 @@ export async function getConnectionStats(): Promise<{
 // ==================== 行映射 ====================
 
 /**
+ * 把 MySQL DATETIME 序列化成自带时区标记的 ISO 字符串。
+ *
+ * 连接池配了 dateStrings: true，DATETIME 原样返回 "2026-08-28 14:30:00"
+ * 这种裸字符串；库里存的是 UTC（见 fetcher.ts 的 toDateTime）。
+ * 直接交给前端 new Date() 会被按浏览器本地时区解析，UTC 时刻被当本地时间读，
+ * 东八区就正好差 8 小时。这里补上 Z 让字符串自我描述为 UTC，
+ * 前端再显式按 Asia/Shanghai 显示。
+ */
+function toIsoUtc(raw: any): string | undefined {
+  if (raw == null) return undefined
+  if (raw instanceof Date) return raw.toISOString()
+  const s = String(raw).trim()
+  if (!s) return undefined
+  // 已带时区后缀（Z 或 ±HH:MM）的原样返回
+  if (/(Z|[+-]\d{2}:?\d{2})$/i.test(s)) return s
+  const d = new Date(`${s.replace(' ', 'T')}Z`)
+  return isNaN(d.getTime()) ? s : d.toISOString()
+}
+
+/**
  * 解析 goal_surge_params 列。
  *
  * JSON 列会被 mysql2 直接解析成对象；TEXT 兜底列则是字符串，需再 parse。
@@ -774,8 +795,8 @@ function rowToRule(row: any): PriceMonitorRule {
     signalType: row.signal_type as any,
     cooldownSeconds: Number(row.cooldown_seconds),
     enabled: row.enabled === 1 || row.enabled === true,
-    createdAt: row.created_at ? String(row.created_at) : undefined,
-    updatedAt: row.updated_at ? String(row.updated_at) : undefined,
+    createdAt: toIsoUtc(row.created_at),
+    updatedAt: toIsoUtc(row.updated_at),
   }
 }
 
@@ -816,7 +837,7 @@ function extractContext(row: any): {
 
   // 只有 listRules 会 SELECT e.end_time；触发/日志查询未带出时保持 undefined
   if (row.end_time != null) {
-    ctx.endTime = String(row.end_time)
+    ctx.endTime = toIsoUtc(row.end_time)
     ctx.matchStatus = computeMatchStatus(row.end_time)
   }
 
@@ -839,7 +860,7 @@ function rowToTrigger(row: any): PriceTriggerRecord {
     changePercent: Number(row.change_percent),
     threshold: Number(row.threshold),
     signalType: String(row.signal_type),
-    triggeredAt: row.triggered_at ? String(row.triggered_at) : undefined,
+    triggeredAt: toIsoUtc(row.triggered_at),
     ...extractContext(row),
   }
 }
@@ -859,7 +880,7 @@ function rowToLog(row: any): PriceBotLog {
     bestAskSize: row.best_ask_size != null ? Number(row.best_ask_size) : null,
     source: row.source ? (String(row.source) as 'ws' | 'rest') : null,
     detail: row.detail ? String(row.detail) : null,
-    loggedAt: row.logged_at ? String(row.logged_at) : undefined,
+    loggedAt: toIsoUtc(row.logged_at),
     ...extractContext(row),
   }
 }
@@ -878,6 +899,6 @@ function rowToConnectionEvent(row: any): PriceBotConnectionEvent {
     priceDelta: row.price_delta != null ? Number(row.price_delta) : null,
     tokenId: row.token_id ? String(row.token_id) : null,
     detail: row.detail ? String(row.detail) : null,
-    createdAt: row.created_at ? String(row.created_at) : undefined,
+    createdAt: toIsoUtc(row.created_at),
   }
 }

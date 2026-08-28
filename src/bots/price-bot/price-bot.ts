@@ -822,12 +822,26 @@ function updatePriceAndEvaluate(
     lastPrice = bestBid;
   }
 
+  // 挂单量继承：best_bid_ask / price_change 这两类 WS 消息只带价格不带量，
+  // 只有 book 全量快照才有 size。若直接用 null 覆盖，会把 book 刚带来的量冲掉，
+  // 导致 bestBidSize 长期为空、goal_surge 的 minBidSize 门槛永远过不了。
+  // 因此价格变化时沿用上一次已知的量，仅在价位本身变化时视为过期。
+  const prev = priceCache.get(tokenId);
+  let effBidSize = bestBidSize;
+  if (effBidSize == null && prev?.bestBidSize != null && prev.bestBid === bestBid) {
+    effBidSize = prev.bestBidSize;
+  }
+  let effAskSize = bestAskSize;
+  if (effAskSize == null && prev?.bestAskSize != null && prev.bestAsk === bestAsk) {
+    effAskSize = prev.bestAskSize;
+  }
+
   const snapshot: PriceSnapshot = {
     tokenId,
     bestBid,
-    bestBidSize,
+    bestBidSize: effBidSize,
     bestAsk,
-    bestAskSize,
+    bestAskSize: effAskSize,
     lastPrice,
     timestamp: new Date().toISOString(),
     source,
@@ -1178,12 +1192,18 @@ function detectGoalSurgeSignal1(
   if (ticks.length < 2) return false
   const first = ticks[0].bid as number
   const last = ticks[ticks.length - 1].bid as number
-  if (last - first < minRise) return false
+  const net = last - first
+  if (net < minRise) return false
   let ups = 0
   for (let i = 1; i < ticks.length; i++) {
     if ((ticks[i].bid as number) > (ticks[i - 1].bid as number)) ups++
   }
-  return ups >= 2
+  // 「至少 2 次上抬」是为了滤掉单跳噪声，但进球越猛、拉升越干脆，
+  // 窗口内 tick 越少（采样有 250ms 去重 + 盘口不变不落库），
+  // 实测大量 0.24~0.72 的净涨因 ups=1 被拦。
+  // 因此按幅度分级：净涨达到阈值 2 倍以上时，单跳即可成立。
+  const decisiveRise = net >= minRise * 2
+  return decisiveRise ? ups >= 1 : ups >= 2
 }
 
 interface GoalSurgeDecision {
@@ -1266,7 +1286,12 @@ function stepGoalSurge(
     const firstBid = (monitor.recentTicks ?? []).find((t) => t.bid != null)?.bid ?? null
     const refBid = signal2 && monitor.preVolatileBid != null ? monitor.preVolatileBid : firstBid
     const bidRising = bid != null && (refBid == null || bid > refBid)
-    const bidSizeOk = bidSize != null && bidSize >= p.minBidSize
+    // 买单量门槛：有量才校验，缺量不阻断。
+    // best_bid_ask / price_change 类 WS 消息不带 size（实测 98% 的采样 size 为空），
+    // 若把「缺量」等同于「量不足」，进球瞬间价格连跳时信号必然被吞掉。
+    // 缺量时放行并在 reserve.note 里标注，下单侧自行决定是否要求量确认。
+    const bidSizeKnown = bidSize != null
+    const bidSizeOk = !bidSizeKnown || bidSize >= p.minBidSize
     const candidateTimeout = Math.max(p.surgeWindowMs * 2, 5_000)
 
     if (bid != null && bidRising && bidSizeOk) {
@@ -1278,7 +1303,9 @@ function stepGoalSurge(
         limitPrice: bid, // 买入限价 = 当时 bestBid（买单挂单价），满足「买价 ≥ bestBid」
         askOk,
         profitOk,
-        note: `触发源=${[signal1 ? '信号一(秒级递增)' : '', signal2 ? '信号二(断联跳升)' : ''].filter(Boolean).join('+')}`,
+        note:
+          `触发源=${[signal1 ? '信号一(秒级递增)' : '', signal2 ? '信号二(断联跳升)' : ''].filter(Boolean).join('+')}` +
+          (bidSizeKnown ? `, 买单量=${bidSize}` : ', 买单量未知(WS未带size)'),
       }
       const prevRef = refBid ?? bid
       evaluation = {
@@ -1479,9 +1506,15 @@ async function handleTrigger(
 // ==================== 启停控制 ====================
 
 /** 启动单个规则监控 */
-export async function startMonitor(ruleId: number): Promise<void> {
-  await ensureTables()
-
+/**
+ * 准备单条规则的监控状态，但不触碰 WS 连接。
+ *
+ * 抽出来是为了让批量启动能「先把所有规则准备好，最后统一连一次 WS」。
+ * refreshWsSubscription() 每次调用都会重建连接（见其注释），
+ * 而每次重连都会开启 volatileWindowMs 高波动抑制窗口，
+ * 逐条调用 startMonitor 会让窗口被反复推后、期间 percent_change 全被抑制。
+ */
+async function prepareMonitor(ruleId: number): Promise<boolean> {
   const rule = await getRule(ruleId)
   if (!rule) {
     throw new Error(`规则 #${ruleId} 不存在`)
@@ -1507,7 +1540,7 @@ export async function startMonitor(ruleId: number): Promise<void> {
     state.monitors.set(ruleId, monitor)
   }
 
-  if (monitor.running) return
+  if (monitor.running) return false
   monitor.running = true
 
   // 规则配置写入缓存：评估路径是同步的，不能在那里读数据库
@@ -1529,8 +1562,9 @@ export async function startMonitor(ruleId: number): Promise<void> {
     startPrice = cached.lastPrice
   }
 
-  const startTime = new Date().toISOString()
-  console.log(`[PriceBot] 规则 #${ruleId} 启动于 ${startTime}, 价格: ${startPrice ?? '待获取'}`)
+  console.log(
+    `[PriceBot] 规则 #${ruleId} 启动于 ${new Date().toISOString()}, 价格: ${startPrice ?? '待获取'}`,
+  )
 
   // 记录启动日志
   await recordLog({
@@ -1546,6 +1580,55 @@ export async function startMonitor(ruleId: number): Promise<void> {
   })
 
   console.log(`[PriceBot] 启动价格监控: 规则 #${ruleId} (${rule.outcome})`)
+  return true
+}
+
+/**
+ * 批量启动多条规则监控。
+ *
+ * 与逐条调用 startMonitor 的区别：WS 订阅只刷新一次，
+ * 因此只会触发一次高波动抑制窗口，而不是每条规则一次。
+ * 单条规则失败不影响其余规则，失败原因随返回值给出。
+ */
+export async function startMonitors(ruleIds: number[]): Promise<{
+  started: number[]
+  alreadyRunning: number[]
+  failed: Array<{ ruleId: number; error: string }>
+}> {
+  await ensureTables()
+
+  const started: number[] = []
+  const alreadyRunning: number[] = []
+  const failed: Array<{ ruleId: number; error: string }> = []
+
+  // 去重：同一规则重复传入只处理一次
+  for (const ruleId of new Set(ruleIds)) {
+    try {
+      const didStart = await prepareMonitor(ruleId)
+      if (didStart) started.push(ruleId)
+      else alreadyRunning.push(ruleId)
+    } catch (err: any) {
+      failed.push({ ruleId, error: err?.message ?? 'unknown' })
+    }
+  }
+
+  // 统一刷新一次 WS 订阅：把本批所有新 token 一次性纳入订阅
+  if (started.length > 0) {
+    refreshWsSubscription(true)
+    startSampleFlush()
+  }
+
+  console.log(
+    `[PriceBot] 批量启动: 成功 ${started.length}, 已在运行 ${alreadyRunning.length}, 失败 ${failed.length}`,
+  )
+  return { started, alreadyRunning, failed }
+}
+
+export async function startMonitor(ruleId: number): Promise<void> {
+  await ensureTables()
+
+  const didStart = await prepareMonitor(ruleId)
+  if (!didStart) return
 
   // 刷新 WS 订阅（如果是新 token，需要加入订阅）
   // wantConnection=true：明确要求连接，清除此前 closeWs() 留下的主动关闭意图

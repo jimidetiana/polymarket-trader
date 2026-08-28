@@ -1040,6 +1040,27 @@ export async function startPriceBotMonitor(ruleId: number): Promise<PriceMonitor
   return data.monitor
 }
 
+export interface BatchStartResult {
+  started: number[]
+  alreadyRunning: number[]
+  failed: Array<{ ruleId: number; error: string }>
+  monitors: PriceMonitorState[]
+}
+
+/**
+ * 批量启动监控。
+ *
+ * 不要用循环调 startPriceBotMonitor 代替：后端每次单条启动都会重建 WS 连接，
+ * 并触发一次高波动抑制窗口，逐条启动会让窗口被反复推后。
+ * ruleIds 省略时后端启动全部已启用规则。
+ */
+export async function startPriceBotMonitorsBatch(ruleIds?: number[]): Promise<BatchStartResult> {
+  return await request<BatchStartResult>('/api/bots/price-bot/monitors/batch-start', {
+    method: 'POST',
+    body: JSON.stringify(ruleIds ? { ruleIds } : {}),
+  })
+}
+
 export async function stopPriceBotMonitor(ruleId: number): Promise<PriceMonitorState> {
   const data = await request<{ monitor: PriceMonitorState }>(`/api/bots/price-bot/monitors/${ruleId}/stop`, {
     method: 'POST',

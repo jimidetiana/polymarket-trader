@@ -21,6 +21,7 @@ import {
   updatePriceBotRule,
   fetchPriceBotMonitors,
   startPriceBotMonitor,
+  startPriceBotMonitorsBatch,
   stopPriceBotMonitor,
   triggerPriceBotMonitor,
   fetchPriceBotTriggers,
@@ -32,6 +33,20 @@ import {
   type PriceBotLog,
   type GoalSurgeParams,
 } from '@/lib/api'
+
+/**
+ * 统一按北京时间显示时间戳。
+ *
+ * 后端返回的是带 Z 的 UTC ISO 串（见 price-bot/db.ts 的 toIsoUtc）。
+ * 这里显式指定 Asia/Shanghai，不依赖浏览器所在时区，
+ * 保证任何机器上看到的都是北京时间。
+ */
+function formatBeijingTime(value: string | null | undefined): string {
+  if (!value) return '—'
+  const d = new Date(value)
+  if (isNaN(d.getTime())) return '—'
+  return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+}
 
 const RULE_TYPE_LABELS: Record<string, string> = {
   percent_change: '百分比变化',
@@ -143,6 +158,7 @@ export default function PriceBotPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilterKey>('all')
   const [marketFilter, setMarketFilter] = useState<MarketFilterKey>('all')
   const [batchCreating, setBatchCreating] = useState(false)
+  const [batchStarting, setBatchStarting] = useState(false)
 
   // 选中机器人的触发记录 / 日志（按 ruleId 过滤，不进 5s 轮询）
   const [botTriggers, setBotTriggers] = useState<PriceTriggerRecord[]>([])
@@ -321,6 +337,32 @@ export default function PriceBotPage() {
     }
   }
 
+  /**
+   * 批量启动全部已启用规则。
+   *
+   * 走后端批量端点而非循环调单条启动：单条启动每次都会重建 WS 连接、
+   * 触发一次高波动抑制窗口，逐条调用会让抑制窗口被反复推后。
+   */
+  async function handleBatchStart() {
+    if (batchStarting) return
+    setBatchStarting(true)
+    try {
+      const result = await startPriceBotMonitorsBatch()
+      await loadMonitors()
+      if (selectedRuleId) await loadBotData(selectedRuleId)
+      const parts = [`已启动 ${result.started.length} 个`]
+      if (result.alreadyRunning.length) parts.push(`${result.alreadyRunning.length} 个已在运行`)
+      if (result.failed.length) {
+        parts.push(`${result.failed.length} 个失败：${result.failed.map((f) => `#${f.ruleId} ${f.error}`).join('; ')}`)
+      }
+      alert(parts.join('，'))
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBatchStarting(false)
+    }
+  }
+
   async function handleMonitorAction(ruleId: number, action: 'start' | 'stop' | 'trigger') {
     try {
       if (action === 'start') await startPriceBotMonitor(ruleId)
@@ -342,6 +384,15 @@ export default function PriceBotPage() {
       subtitle="左侧选择机器人，右侧查看监控详情"
       actions={
         <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleBatchStart}
+            disabled={batchStarting}
+            className="flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+            title="一次性启动全部已启用规则的监控（只重建一次 WS 连接）"
+          >
+            <Play className="h-4 w-4" />
+            {batchStarting ? '启动中...' : '全部启动'}
+          </button>
           <button
             onClick={handleEngineTrigger}
             className="flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-sm hover:bg-muted"
@@ -890,7 +941,7 @@ function RuleSection({ rule }: { rule: PriceMonitorRule }) {
       <KV label="结果" value={rule.outcome} />
       {rule.marketName && <KV label="盘口" value={marketSuffixOf(rule.marketName)} />}
       {rule.createdAt && (
-        <KV label="创建时间" value={new Date(rule.createdAt).toLocaleString('zh-CN')} />
+        <KV label="创建时间" value={formatBeijingTime(rule.createdAt)} />
       )}
     </div>
   )
@@ -919,11 +970,11 @@ function StatusSection({ monitor }: { monitor: PriceMonitorState | null }) {
       <KV label="检测轮次" value={monitor.cyclesRun} />
       <KV
         label="上次触发"
-        value={monitor.lastTriggerTime ? new Date(monitor.lastTriggerTime).toLocaleString('zh-CN') : '—'}
+        value={formatBeijingTime(monitor.lastTriggerTime)}
       />
       <KV
         label="上次轮询"
-        value={monitor.lastPollTime ? new Date(monitor.lastPollTime).toLocaleString('zh-CN') : '—'}
+        value={formatBeijingTime(monitor.lastPollTime)}
       />
       {monitor.lastError && (
         <div className="col-span-2 flex flex-col gap-0.5 sm:col-span-3">
@@ -964,7 +1015,7 @@ function TriggersSection({ triggers }: { triggers: PriceTriggerRecord[] }) {
             </span>
             {t.triggeredAt && (
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                {new Date(t.triggeredAt).toLocaleString('zh-CN')}
+                {formatBeijingTime(t.triggeredAt)}
               </span>
             )}
           </div>
@@ -996,7 +1047,7 @@ function LogsSection({ logs }: { logs: PriceBotLog[] }) {
             {log.detail && <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{log.detail}</span>}
             {log.loggedAt && (
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                {new Date(log.loggedAt).toLocaleString('zh-CN')}
+                {formatBeijingTime(log.loggedAt)}
               </span>
             )}
           </div>
