@@ -4,12 +4,13 @@
  * 管理监控规则表和触发事件记录表。
  */
 
-import { pool } from '../../soccer/db.js'
+import { pool, computeMatchStatus } from '../../soccer/db.js'
 import type {
   PriceMonitorRule,
   PriceTriggerRecord,
   PriceBotLog,
   PriceBotConnectionEvent,
+  GoalSurgeParams,
 } from './types.js'
 
 // ==================== 表结构 ====================
@@ -49,7 +50,7 @@ async function doEnsureTables(): Promise<void> {
       price_low DECIMAL(8,4) DEFAULT NULL,
       price_high DECIMAL(8,4) DEFAULT NULL,
       signal_type VARCHAR(20) NOT NULL DEFAULT 'alert' COMMENT 'buy_signal/sell_signal/alert',
-      cooldown_seconds INT NOT NULL DEFAULT 300,
+      cooldown_seconds INT NOT NULL DEFAULT 1,
       enabled TINYINT(1) NOT NULL DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -59,6 +60,9 @@ async function doEnsureTables(): Promise<void> {
       KEY idx_enabled (enabled)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
+
+  // 已存在的表补充 goal_surge 参数列（JSON，老版本 MySQL 退化 TEXT）
+  await ensureRuleColumns()
 
   await pool.execute(`
     CREATE TABLE IF NOT EXISTS price_bot_triggers (
@@ -189,6 +193,41 @@ async function ensureLogColumns(): Promise<void> {
   }
 }
 
+/**
+ * 为已存在的 price_bot_rules 表补充 goal_surge 参数列。
+ *
+ * goal_surge 的多个阈值没有独立列，统一存进一个 JSON 列；
+ * 老版本 MySQL(<5.7) 不支持 JSON，退化为 TEXT。按列名检查，可重复执行。
+ */
+async function ensureRuleColumns(): Promise<void> {
+  const [cols] = await pool.execute<any[]>(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'price_bot_rules'`,
+  )
+  const existing = new Set(cols.map((c) => String(c.COLUMN_NAME)))
+  if (existing.has('goal_surge_params')) return
+
+  try {
+    await pool.execute(
+      `ALTER TABLE price_bot_rules ADD COLUMN goal_surge_params JSON DEFAULT NULL`,
+    )
+    console.log('[PriceBot] price_bot_rules 补充列: goal_surge_params (JSON)')
+  } catch (err: any) {
+    if (/duplicate column/i.test(err.message || '')) return
+    // 老版本 MySQL 不支持 JSON，退化为 TEXT
+    try {
+      await pool.execute(
+        `ALTER TABLE price_bot_rules ADD COLUMN goal_surge_params TEXT DEFAULT NULL`,
+      )
+      console.log('[PriceBot] price_bot_rules 补充列: goal_surge_params (TEXT 兜底)')
+    } catch (err2: any) {
+      if (!/duplicate column/i.test(err2.message || '')) {
+        console.error('[PriceBot] 补充列 goal_surge_params 失败:', err2.message)
+      }
+    }
+  }
+}
+
 // ==================== 规则 CRUD ====================
 
 export async function listRules(options: {
@@ -203,29 +242,40 @@ export async function listRules(options: {
   const params: any[] = []
 
   if (options.enabledOnly) {
-    where.push('enabled = 1')
+    where.push('r.enabled = 1')
   }
   if (options.eventId) {
-    where.push('event_id = ?')
+    where.push('r.event_id = ?')
     params.push(options.eventId)
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
   const [countRows] = await pool.execute<any[]>(
-    `SELECT COUNT(*) as total FROM price_bot_rules ${whereSql}`,
+    `SELECT COUNT(*) as total FROM price_bot_rules r ${whereSql}`,
     params,
   )
   const total = countRows[0]?.total ?? 0
 
-  const limit = Math.max(1, Math.min(1000, Math.floor(Number(options.limit) ?? 100)))
-  const offset = Math.max(0, Math.floor(Number(options.offset) ?? 0))
+  const limit = Math.max(1, Math.min(1000, Math.floor(Number(options.limit ?? 100))))
+  const offset = Math.max(0, Math.floor(Number(options.offset ?? 0)))
+  // LEFT JOIN 赛事/盘口，让左侧机器人列表能直接显示「主队 vs 客队」和盘口名。
+  // 用 LEFT JOIN：赛事数据可能已被清理，规则本身仍要能列出来。
   const [rows] = await pool.execute<any[]>(
-    `SELECT * FROM price_bot_rules ${whereSql} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`,
+    `SELECT r.*,
+            e.home_team_zh, e.away_team_zh,
+            e.home_team_en, e.away_team_en,
+            e.league, e.end_time,
+            m.question_zh, m.question_en, m.market_type, m.line
+       FROM price_bot_rules r
+       LEFT JOIN soccer_events e ON e.id = r.event_id
+       LEFT JOIN soccer_markets m ON m.id = r.market_id
+     ${whereSql}
+     ORDER BY r.id DESC LIMIT ${limit} OFFSET ${offset}`,
     params,
   )
 
-  const rules = rows.map(row => rowToRule(row))
+  const rules = rows.map(row => ({ ...rowToRule(row), ...extractContext(row) }))
   return { rules, total }
 }
 
@@ -243,9 +293,9 @@ export async function createRule(rule: Omit<PriceMonitorRule, 'id' | 'createdAt'
   const [result] = await pool.execute<any>(
     `INSERT INTO price_bot_rules
        (token_id, market_id, event_id, outcome, rule_type, direction,
-        percent_threshold, target_price, price_low, price_high,
+        percent_threshold, target_price, price_low, price_high, goal_surge_params,
         signal_type, cooldown_seconds, enabled)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       rule.tokenId,
       rule.marketId,
@@ -257,6 +307,7 @@ export async function createRule(rule: Omit<PriceMonitorRule, 'id' | 'createdAt'
       rule.targetPrice ?? null,
       rule.priceLow ?? null,
       rule.priceHigh ?? null,
+      rule.goalSurgeParams ? JSON.stringify(rule.goalSurgeParams) : null,
       rule.signalType,
       rule.cooldownSeconds,
       rule.enabled ? 1 : 0,
@@ -278,6 +329,7 @@ export async function updateRule(id: number, updates: Partial<PriceMonitorRule>)
     targetPrice: 'target_price',
     priceLow: 'price_low',
     priceHigh: 'price_high',
+    goalSurgeParams: 'goal_surge_params',
     signalType: 'signal_type',
     cooldownSeconds: 'cooldown_seconds',
     enabled: 'enabled',
@@ -287,7 +339,14 @@ export async function updateRule(id: number, updates: Partial<PriceMonitorRule>)
     if (updates[key as keyof PriceMonitorRule] !== undefined) {
       sets.push(`${col} = ?`)
       const val = updates[key as keyof PriceMonitorRule]
-      params.push(typeof val === 'boolean' ? (val ? 1 : 0) : val)
+      if (typeof val === 'boolean') {
+        params.push(val ? 1 : 0)
+      } else if (val !== null && typeof val === 'object') {
+        // goalSurgeParams 等对象列存 JSON 文本
+        params.push(JSON.stringify(val))
+      } else {
+        params.push(val)
+      }
     }
   }
 
@@ -411,8 +470,9 @@ export async function recordLog(log: Omit<PriceBotLog, 'id' | 'loggedAt'>): Prom
   await ensureTables()
   const [result] = await pool.execute<any>(
     `INSERT INTO price_bot_logs
-       (rule_id, token_id, event_id, outcome, action, price, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (rule_id, token_id, event_id, outcome, action, price,
+        best_bid, best_bid_size, best_ask, best_ask_size, source, detail)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       log.ruleId,
       log.tokenId,
@@ -420,10 +480,58 @@ export async function recordLog(log: Omit<PriceBotLog, 'id' | 'loggedAt'>): Prom
       log.outcome,
       log.action,
       log.price ?? null,
+      log.bestBid ?? null,
+      log.bestBidSize ?? null,
+      log.bestAsk ?? null,
+      log.bestAskSize ?? null,
+      log.source ?? null,
       log.detail ?? null,
     ],
   )
   return Number(result.insertId)
+}
+
+/**
+ * 批量写入日志（价格采样用）。
+ *
+ * 采样频率可达每秒数十条，逐条 INSERT 会拖慢评估路径，
+ * 所以由调用方缓冲后批量提交。
+ */
+export async function recordLogsBatch(
+  logs: Array<Omit<PriceBotLog, 'id' | 'loggedAt'> & { loggedAt?: string }>,
+): Promise<number> {
+  if (logs.length === 0) return 0
+  await ensureTables()
+
+  const placeholders = logs.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
+  const params: any[] = []
+  for (const log of logs) {
+    params.push(
+      log.ruleId,
+      log.tokenId,
+      log.eventId,
+      log.outcome,
+      log.action,
+      log.price ?? null,
+      log.bestBid ?? null,
+      log.bestBidSize ?? null,
+      log.bestAsk ?? null,
+      log.bestAskSize ?? null,
+      log.source ?? null,
+      log.detail ?? null,
+      // 采样时刻由调用方给出，落库延迟不应影响时间戳
+      log.loggedAt ? new Date(log.loggedAt) : new Date(),
+    )
+  }
+
+  const [result] = await pool.execute<any>(
+    `INSERT INTO price_bot_logs
+       (rule_id, token_id, event_id, outcome, action, price,
+        best_bid, best_bid_size, best_ask, best_ask_size, source, detail, logged_at)
+     VALUES ${placeholders}`,
+    params,
+  )
+  return Number(result.affectedRows ?? logs.length)
 }
 
 export async function listLogs(options: {
@@ -633,6 +741,22 @@ export async function getConnectionStats(): Promise<{
 
 // ==================== 行映射 ====================
 
+/**
+ * 解析 goal_surge_params 列。
+ *
+ * JSON 列会被 mysql2 直接解析成对象；TEXT 兜底列则是字符串，需再 parse。
+ */
+function parseGoalSurgeParams(raw: any): GoalSurgeParams | undefined {
+  if (raw == null) return undefined
+  if (typeof raw === 'object') return raw as GoalSurgeParams
+  try {
+    const parsed = JSON.parse(String(raw))
+    return parsed && typeof parsed === 'object' ? (parsed as GoalSurgeParams) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function rowToRule(row: any): PriceMonitorRule {
   return {
     id: Number(row.id),
@@ -646,6 +770,7 @@ function rowToRule(row: any): PriceMonitorRule {
     targetPrice: row.target_price != null ? Number(row.target_price) : undefined,
     priceLow: row.price_low != null ? Number(row.price_low) : undefined,
     priceHigh: row.price_high != null ? Number(row.price_high) : undefined,
+    goalSurgeParams: parseGoalSurgeParams(row.goal_surge_params),
     signalType: row.signal_type as any,
     cooldownSeconds: Number(row.cooldown_seconds),
     enabled: row.enabled === 1 || row.enabled === true,
@@ -666,18 +791,36 @@ function extractContext(row: any): {
   marketName?: string
   marketType?: string
   line?: number
+  matchStatus?: 'not_started' | 'live' | 'ended'
+  endTime?: string
 } {
   const home = row.home_team_zh || row.home_team_en
   const away = row.away_team_zh || row.away_team_en
   const matchName = home && away ? `${home} vs ${away}` : undefined
 
-  return {
+  const ctx: {
+    matchName?: string
+    league?: string
+    marketName?: string
+    marketType?: string
+    line?: number
+    matchStatus?: 'not_started' | 'live' | 'ended'
+    endTime?: string
+  } = {
     matchName,
     league: row.league ? String(row.league) : undefined,
     marketName: row.question_zh || row.question_en || undefined,
     marketType: row.market_type ? String(row.market_type) : undefined,
     line: row.line != null ? Number(row.line) : undefined,
   }
+
+  // 只有 listRules 会 SELECT e.end_time；触发/日志查询未带出时保持 undefined
+  if (row.end_time != null) {
+    ctx.endTime = String(row.end_time)
+    ctx.matchStatus = computeMatchStatus(row.end_time)
+  }
+
+  return ctx
 }
 
 function rowToTrigger(row: any): PriceTriggerRecord {
@@ -710,6 +853,11 @@ function rowToLog(row: any): PriceBotLog {
     outcome: String(row.outcome),
     action: row.action as any,
     price: row.price != null ? Number(row.price) : null,
+    bestBid: row.best_bid != null ? Number(row.best_bid) : null,
+    bestBidSize: row.best_bid_size != null ? Number(row.best_bid_size) : null,
+    bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+    bestAskSize: row.best_ask_size != null ? Number(row.best_ask_size) : null,
+    source: row.source ? (String(row.source) as 'ws' | 'rest') : null,
     detail: row.detail ? String(row.detail) : null,
     loggedAt: row.logged_at ? String(row.logged_at) : undefined,
     ...extractContext(row),

@@ -7,6 +7,28 @@
 
 // ==================== 配置类型 ====================
 
+/**
+ * 进球买入信号（goal_surge）参数。所有字段可选，留空回退 PriceBotConfig.goalSurgeDefaults。
+ */
+export interface GoalSurgeParams {
+  /** 信号一：秒级递增回看窗口（毫秒） */
+  surgeWindowMs?: number
+  /** 信号一：窗口内 bestBid 净涨阈值（如 0.03） */
+  surgeMinRise?: number
+  /** 信号二：断联/波动窗口内相对进入前基准的跳升阈值（如 0.05） */
+  jumpThreshold?: number
+  /** 买单门槛：最小买单量（点3 信心，判断能否下单） */
+  minBidSize?: number
+  /** 卖单评估：最小卖单量（成交性） */
+  minAskSize?: number
+  /** 卖单评估：ask 价格上限（≤ 该值才有到 1.0 的利润空间，如 0.97） */
+  askCeiling?: number
+  /** 确认阶段：价格持稳下限（如 0.98，bestBid ≥ 该值且 <1.0 视为已确认真实） */
+  confirmMin?: number
+  /** 确认阶段：持稳时长（毫秒） */
+  confirmHoldMs?: number
+}
+
 export interface PriceBotConfig {
   enabled: boolean
   pollIntervalMs: number
@@ -23,6 +45,21 @@ export interface PriceBotConfig {
   volatileWindowMs: number
   /** 是否在高波动窗口内抑制 percent_change 规则 */
   suppressVolatilePercentChange: boolean
+  /** 是否把价格采样落库（用于回放价格路径、分析信号真伪） */
+  samplePrices: boolean
+  /**
+   * 同一规则两次采样的最小间隔（毫秒）。
+   *
+   * 盘口不变时不落库，所以剧烈波动期采样自然变密、平静期自然变稀。
+   * 该值只是给突发流量兜一个上限。
+   */
+  sampleMinIntervalMs: number
+  /** 采样缓冲区刷盘间隔（毫秒），批量 INSERT 以免拖慢评估路径 */
+  sampleFlushIntervalMs: number
+  /** 是否启用自动下单（本期占位，默认 false：只记录、不真下单） */
+  autoTradeEnabled: boolean
+  /** 进球买入信号默认参数（rule 未配置对应字段时回退） */
+  goalSurgeDefaults: GoalSurgeParams
 }
 
 export const DEFAULT_CONFIG: PriceBotConfig = {
@@ -35,12 +72,26 @@ export const DEFAULT_CONFIG: PriceBotConfig = {
   pongTimeoutMs: 10_000,
   volatileWindowMs: 8_000,
   suppressVolatilePercentChange: true,
+  samplePrices: true,
+  sampleMinIntervalMs: 250,
+  sampleFlushIntervalMs: 2_000,
+  autoTradeEnabled: false,
+  goalSurgeDefaults: {
+    surgeWindowMs: 3_000,
+    surgeMinRise: 0.03,
+    jumpThreshold: 0.05,
+    minBidSize: 50,
+    minAskSize: 50,
+    askCeiling: 0.97,
+    confirmMin: 0.98,
+    confirmHoldMs: 2_000,
+  },
 }
 
 // ==================== 监控规则类型 ====================
 
 /** 规则类型：价格变化百分比 / 价格绝对值突破 / 价格区间 */
-export type PriceRuleType = 'percent_change' | 'price_break' | 'price_range'
+export type PriceRuleType = 'percent_change' | 'price_break' | 'price_range' | 'goal_surge'
 
 /** 监控方向：上涨 / 下跌 / 双向 */
 export type PriceDirection = 'up' | 'down' | 'both'
@@ -48,8 +99,12 @@ export type PriceDirection = 'up' | 'down' | 'both'
 /**
  * 价格监控规则配置
  * 每个被监控的 token 对应一条规则
+ *
+ * 继承 MatchContext：listRules 查询会 LEFT JOIN 带出比赛/盘口名，
+ * 让前端机器人列表能直接显示「主队 vs 客队」。这些字段均为可选，
+ * create/update 路径不设置它们。
  */
-export interface PriceMonitorRule {
+export interface PriceMonitorRule extends MatchContext {
   id?: number
   tokenId: string
   marketId: string
@@ -69,6 +124,8 @@ export interface PriceMonitorRule {
   signalType: 'buy_signal' | 'sell_signal' | 'alert'
   /** 冷却时间（秒），防止同一规则频繁触发 */
   cooldownSeconds: number
+  /** 进球买入信号参数（ruleType=goal_surge 时使用），留空回退 config 默认 */
+  goalSurgeParams?: GoalSurgeParams
   enabled: boolean
   createdAt?: string
   updatedAt?: string
@@ -106,6 +163,10 @@ export interface MatchContext {
   marketType?: string
   /** 盘口线，如 3.5 */
   line?: number
+  /** 比赛状态（由 end_time 现算：not_started/live/ended），供左侧列表过滤 */
+  matchStatus?: 'not_started' | 'live' | 'ended'
+  /** 比赛 end_time（作 kickoff 代理），供排序/过滤 */
+  endTime?: string
 }
 
 // ==================== 触发事件记录 ====================
@@ -154,6 +215,22 @@ export interface PriceMonitorState {
   triggerInFlight?: boolean
   /** 因处于高波动窗口而被抑制的触发次数（用于观察抑制是否过度） */
   suppressedCount?: number
+  /** 上次价格采样时刻（毫秒时间戳），用于限制采样频率 */
+  lastSampleAt?: number
+  /** 上次采样的盘口指纹，盘口完全未变时跳过采样 */
+  lastSampleKey?: string
+  /** 已缓冲的采样条数（用于观察采样量） */
+  sampledCount?: number
+  /** goal_surge：最近若干 tick 的环形缓冲（内存，秒级递增判定用） */
+  recentTicks?: Array<{ t: number; bid: number | null; ask: number | null; mid: number | null; bidSize: number | null; askSize: number | null }>
+  /** goal_surge：状态机当前态 */
+  goalSurgeState?: 'idle' | 'candidate'
+  /** goal_surge：候选态起始时间戳（毫秒），用于买单门槛超时回退 */
+  candidateSince?: number
+  /** goal_surge：进入波动窗口前的 bestBid 基准（信号二比较用） */
+  preVolatileBid?: number | null
+  /** goal_surge：已发买入信号、待「价格稳定在 confirmMin」事后确认 */
+  pendingConfirm?: { signalTime: number; holdStartedAt?: number } | null
 }
 
 // ==================== 监控日志 ====================
@@ -164,8 +241,20 @@ export interface PriceBotLog extends MatchContext {
   tokenId: string
   eventId: string
   outcome: string
-  action: 'start' | 'stop' | 'price_update' | 'trigger' | 'disconnect' | 'reconnect'
+  action: 'start' | 'stop' | 'price_update' | 'trigger' | 'buy_signal' | 'disconnect' | 'reconnect'
+  /** 中间价 (bestBid + bestAsk) / 2 */
   price: number | null
+  /**
+   * 盘口快照。买入实际吃 bestAsk、卖出吃 bestBid，
+   * 只看中间价会把「报价被撤单导致 mid 跳变」误判成价格变化，
+   * 所以判断信号真伪必须落库这四个字段。
+   */
+  bestBid?: number | null
+  bestBidSize?: number | null
+  bestAsk?: number | null
+  bestAskSize?: number | null
+  /** 数据来源：ws 实时推送 / rest 断联兜底轮询 */
+  source?: 'ws' | 'rest' | null
   detail: string | null
   loggedAt?: string
 }

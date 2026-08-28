@@ -1351,6 +1351,24 @@ app.post('/api/bots/price-bot/rules', asyncHandler(async (req, res) => {
     return;
   }
 
+  // goal_surge 只允许建在 total / first_scorer 盘口上
+  //（只有这两类盘口，再进一球才会把某 outcome 概率推向 100%）。
+  // market_type 不在规则行上，只能查 soccer_markets 校验。
+  if (body.ruleType === 'goal_surge') {
+    const [mrows] = await pool.execute<any[]>(
+      `SELECT market_type FROM soccer_markets WHERE id = ?`,
+      [String(body.marketId)],
+    );
+    const mt = mrows.length ? String(mrows[0].market_type) : null;
+    if (mt !== 'total' && mt !== 'first_scorer') {
+      res.status(400).json({
+        success: false,
+        error: `进球买入信号(goal_surge)仅支持 大小球(total) / 谁先进球(first_scorer) 盘口，当前盘口类型: ${mt ?? '未找到'}`,
+      });
+      return;
+    }
+  }
+
   const id = await createRule({
     tokenId: String(body.tokenId),
     marketId: String(body.marketId),
@@ -1362,12 +1380,96 @@ app.post('/api/bots/price-bot/rules', asyncHandler(async (req, res) => {
     targetPrice: body.targetPrice != null ? Number(body.targetPrice) : undefined,
     priceLow: body.priceLow != null ? Number(body.priceLow) : undefined,
     priceHigh: body.priceHigh != null ? Number(body.priceHigh) : undefined,
+    goalSurgeParams:
+      body.goalSurgeParams && typeof body.goalSurgeParams === 'object' ? body.goalSurgeParams : undefined,
     signalType: body.signalType as any,
-    cooldownSeconds: body.cooldownSeconds != null ? Number(body.cooldownSeconds) : 300,
+    cooldownSeconds: body.cooldownSeconds != null ? Number(body.cooldownSeconds) : 1,
     enabled: body.enabled !== false,
   });
   const rule = await getRule(id);
   res.json({ success: true, rule });
+}));
+
+app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res) => {
+  // 一键批量创建：取「即将开赛」的前 5 场（not_started，按临近开赛升序），
+  // 对每场的 大小球(total) 盘口建 Over 监控、谁先进球(first_scorer) 盘口建 Yes 监控。
+  // 大小球只保留总进球数 0.5/1.5/2.5/3.5/4.5 线，排除角球及其他线（见下方过滤）。
+  // 全部为 goal_surge / direction=up / signalType=buy_signal，靠 uk_token_rule 唯一键天然去重。
+  const events = (await getEventsWithMarkets())
+    .filter((e: any) => e.match_status === 'not_started')
+    .slice(0, 5);
+
+  const created: Array<{
+    ruleId: number; eventId: string; marketId: string; marketType: string; line: number | null; outcome: string;
+  }> = [];
+  const skipped: Array<{
+    eventId: string; marketId: string; marketType: string; line: number | null; reason: string;
+  }> = [];
+  // 大小球只保留「总进球数」这几条线；其余线（如 5.5/6.5）与角球盘一律不建
+  const ALLOWED_TOTAL_LINES = new Set([0.5, 1.5, 2.5, 3.5, 4.5]);
+
+  for (const ev of events) {
+    const eventId = String((ev as any).id);
+    const markets = await getMarketsForEvent(eventId);
+    for (const m of markets) {
+      const marketType = String(m.market_type);
+      if (marketType !== 'total' && marketType !== 'first_scorer') continue;
+
+      // 大小球(total)：只保留总进球数 0.5/1.5/2.5/3.5/4.5 线；排除角球盘。
+      // classifyMarketType 把含 over/under 的角球盘也归入了 total，
+      // 且平台角球盘几乎无人交易，故按「问题含 corner/角球」+「线不在白名单」双重剔除。
+      if (marketType === 'total') {
+        const qEn = String(m.question_en ?? '').toLowerCase();
+        const qZh = String(m.question_zh ?? '');
+        if (qEn.includes('corner') || qZh.includes('角球')) continue;
+        // 线可能存在于两处：DB 的 line 列（DECIMAL，mysql2 返回字符串），
+        // 或问题文本里的 "X.5"。平台并非所有大小球盘都填了 line 列，
+        // 故两处都取候选值，任一命中白名单即保留，避免把有效盘口误杀。
+        const candidates: number[] = [];
+        if (m.line != null) {
+          const n = Number(m.line);
+          if (Number.isFinite(n)) candidates.push(n);
+        }
+        const qm = qEn.match(/(\d+\.5)(?!\d)/); // 大小球线恒为半整数：0.5/1.5/2.5...
+        if (qm) candidates.push(Number(qm[1]));
+        if (!candidates.some((n) => ALLOWED_TOTAL_LINES.has(n))) continue;
+      }
+
+      const wanted = marketType === 'total' ? 'over' : 'yes'; // 大小球监控 Over，首球监控 Yes
+
+      // outcomes 与 clob_token_ids 索引对齐（见 /api/soccer/positions 的配对逻辑）
+      const outcomes = parseJsonArray(m.outcomes);
+      const tokens = parseJsonArray(m.clob_token_ids);
+      const idx = outcomes.findIndex((o) => String(o).trim().toLowerCase() === wanted);
+      if (idx < 0 || tokens[idx] == null) {
+        skipped.push({ eventId, marketId: String(m.id), marketType, line: m.line, reason: `未匹配到 ${wanted} outcome` });
+        continue;
+      }
+
+      try {
+        const ruleId = await createRule({
+          tokenId: String(tokens[idx]),
+          marketId: String(m.id),
+          eventId,
+          outcome: String(outcomes[idx]),
+          ruleType: 'goal_surge' as any,
+          direction: 'up' as any,
+          signalType: 'buy_signal' as any,
+          cooldownSeconds: 1,
+          enabled: true,
+        });
+        created.push({ ruleId, eventId, marketId: String(m.id), marketType, line: m.line, outcome: String(outcomes[idx]) });
+      } catch (err: any) {
+        const dup = /duplicate|ER_DUP_ENTRY/i.test(err?.message || '');
+        skipped.push({
+          eventId, marketId: String(m.id), marketType, line: m.line,
+          reason: dup ? '规则已存在' : `创建失败: ${err?.message ?? 'unknown'}`,
+        });
+      }
+    }
+  }
+
+  res.json({ success: true, created, skipped, eventsScanned: events.length });
 }));
 
 app.put('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {

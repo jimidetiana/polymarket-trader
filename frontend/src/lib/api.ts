@@ -834,23 +834,47 @@ export interface PriceBotStatus {
   wsConnected: boolean
 }
 
+/** 进球买入信号（goal_surge）参数，全部可选，留空由后端用默认值回退 */
+export interface GoalSurgeParams {
+  surgeWindowMs?: number
+  surgeMinRise?: number
+  jumpThreshold?: number
+  minBidSize?: number
+  minAskSize?: number
+  askCeiling?: number
+  confirmMin?: number
+  confirmHoldMs?: number
+}
+
 export interface PriceMonitorRule {
   id?: number
   tokenId: string
   marketId: string
   eventId: string
   outcome: string
-  ruleType: 'percent_change' | 'price_break' | 'price_range'
+  ruleType: 'percent_change' | 'price_break' | 'price_range' | 'goal_surge'
   direction: 'up' | 'down' | 'both'
   percentThreshold?: number
   targetPrice?: number
   priceLow?: number
   priceHigh?: number
+  /** ruleType=goal_surge 时使用，留空回退后端默认 */
+  goalSurgeParams?: GoalSurgeParams
   signalType: 'buy_signal' | 'sell_signal' | 'alert'
   cooldownSeconds: number
   enabled: boolean
   createdAt?: string
   updatedAt?: string
+  // listRules LEFT JOIN 带出的比赛/盘口上下文（与 MatchContext 一致，均可选）
+  matchName?: string
+  league?: string
+  marketName?: string
+  marketType?: string
+  line?: number
+  /** 比赛状态（后端由 end_time 现算），供左侧列表过滤 */
+  matchStatus?: 'not_started' | 'live' | 'ended'
+  /** 比赛 end_time（作 kickoff 代理），供排序/过滤 */
+  endTime?: string
 }
 
 export interface PriceMonitorState {
@@ -899,7 +923,7 @@ export interface PriceBotLog extends MatchContext {
   tokenId: string
   eventId: string
   outcome: string
-  action: 'start' | 'stop' | 'price_update' | 'trigger' | 'disconnect' | 'reconnect'
+  action: 'start' | 'stop' | 'price_update' | 'trigger' | 'buy_signal' | 'disconnect' | 'reconnect'
   price: number | null
   detail: string | null
   loggedAt?: string
@@ -963,6 +987,33 @@ export async function createPriceBotRule(rule: Omit<PriceMonitorRule, 'id' | 'cr
     body: JSON.stringify(rule),
   })
   return data.rule
+}
+
+/** 一键批量创建：未来 5 场比赛的大小球(Over) + 首球(Yes) goal_surge 监控机器人 */
+export interface QuickCreateResult {
+  success: boolean
+  created: Array<{
+    ruleId: number
+    eventId: string
+    marketId: string
+    marketType: string
+    line: number | null
+    outcome: string
+  }>
+  skipped: Array<{
+    eventId: string
+    marketId: string
+    marketType: string
+    line: number | null
+    reason: string
+  }>
+  eventsScanned: number
+}
+
+export async function quickCreatePriceBotRules(): Promise<QuickCreateResult> {
+  return await request<QuickCreateResult>('/api/bots/price-bot/rules/batch-quick', {
+    method: 'POST',
+  })
 }
 
 export async function updatePriceBotRule(id: number, rule: Partial<PriceMonitorRule>): Promise<PriceMonitorRule> {

@@ -27,6 +27,7 @@ import {
   listTriggers,
   getLastTriggerTime,
   recordLog,
+  recordLogsBatch,
   listLogs,
   recordConnectionEvent,
   updateConnectionEventPrice,
@@ -43,6 +44,7 @@ import type {
   BotState,
   PriceRuleType,
   PriceDirection,
+  GoalSurgeParams,
 } from './types.js';
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
@@ -109,6 +111,138 @@ const restAxios = axios.create({
   timeout: 5000,
   ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl) } : {}),
 });
+
+// ==================== 价格采样 ====================
+
+/**
+ * 一条价格采样。
+ *
+ * 只存中间价无法判断信号真伪：买入吃 bestAsk、卖出吃 bestBid，
+ * 而报价被撤单/补回会让 mid 跳变却没有任何成交。
+ * 所以采样必须带上双边报价和挂单量。
+ */
+interface PriceSample {
+  ruleId: number
+  tokenId: string
+  eventId: string
+  outcome: string
+  price: number | null
+  bestBid: number | null
+  bestBidSize: number | null
+  bestAsk: number | null
+  bestAskSize: number | null
+  source: 'ws' | 'rest' | null
+  loggedAt: string
+}
+
+/** 采样缓冲区：评估路径每分钟可达数千次，逐条 INSERT 会拖慢评估 */
+const sampleBuffer: PriceSample[] = []
+let sampleFlushTimer: NodeJS.Timeout | null = null
+let sampleFlushInFlight = false
+let sampleDropped = 0
+
+/** 缓冲区上限：刷盘持续失败时丢弃新样本，而不是无界增长吃内存 */
+const MAX_SAMPLE_BUFFER = 20_000
+/** 单次 INSERT 行数上限（每行 13 个占位符，避免触到 MySQL 占位符上限） */
+const SAMPLE_CHUNK = 400
+
+/**
+ * 缓冲一条价格采样。
+ *
+ * 全同步实现，只做内存 push，因此可以安全地在 evaluateRuleForId
+ * 的同步临界区之前调用。
+ *
+ * 盘口指纹未变时跳过，所以剧烈波动期采样自然变密、平静期自然变稀，
+ * 不需要固定采样率就能把关键时刻的价格路径记全。
+ */
+function bufferPriceSample(
+  rule: PriceMonitorRule,
+  monitor: PriceMonitorState,
+  snapshot: PriceSnapshot,
+): void {
+  if (!state.config.samplePrices) return
+
+  // 指纹含挂单量：报价被撤单/补回本身就是要研究的现象
+  const key = `${snapshot.bestBid}|${snapshot.bestBidSize}|${snapshot.bestAsk}|${snapshot.bestAskSize}`
+  if (monitor.lastSampleKey === key) return
+
+  const now = Date.now()
+  if (
+    monitor.lastSampleAt != null &&
+    now - monitor.lastSampleAt < state.config.sampleMinIntervalMs
+  ) {
+    return
+  }
+
+  monitor.lastSampleKey = key
+  monitor.lastSampleAt = now
+
+  if (sampleBuffer.length >= MAX_SAMPLE_BUFFER) {
+    sampleDropped++
+    return
+  }
+
+  monitor.sampledCount = (monitor.sampledCount ?? 0) + 1
+  sampleBuffer.push({
+    ruleId: rule.id!,
+    tokenId: rule.tokenId,
+    eventId: rule.eventId,
+    outcome: rule.outcome,
+    price: snapshot.lastPrice,
+    bestBid: snapshot.bestBid,
+    bestBidSize: snapshot.bestBidSize,
+    bestAsk: snapshot.bestAsk,
+    bestAskSize: snapshot.bestAskSize,
+    source: snapshot.source ?? null,
+    loggedAt: snapshot.timestamp,
+  })
+}
+
+/**
+ * 把缓冲区采样批量落库。
+ *
+ * 采样属于观测数据，单批失败时记录日志后丢弃该批，
+ * 不重试也不阻塞后续批次——保住监控主流程比保住样本重要。
+ */
+async function flushSamples(): Promise<void> {
+  if (sampleFlushInFlight || sampleBuffer.length === 0) return
+  sampleFlushInFlight = true
+
+  try {
+    while (sampleBuffer.length > 0) {
+      const chunk = sampleBuffer.splice(0, SAMPLE_CHUNK)
+      try {
+        await recordLogsBatch(
+          chunk.map((s) => ({ ...s, action: 'price_update' as const, detail: null })),
+        )
+      } catch (err: any) {
+        console.error(`[PriceBot] 采样落库失败，丢弃 ${chunk.length} 条:`, err.message)
+      }
+    }
+    if (sampleDropped > 0) {
+      console.warn(`[PriceBot] 缓冲区溢出，累计丢弃采样 ${sampleDropped} 条`)
+      sampleDropped = 0
+    }
+  } finally {
+    sampleFlushInFlight = false
+  }
+}
+
+function startSampleFlush(): void {
+  if (sampleFlushTimer) return
+  sampleFlushTimer = setInterval(() => {
+    void flushSamples()
+  }, state.config.sampleFlushIntervalMs)
+}
+
+function stopSampleFlush(): void {
+  if (sampleFlushTimer) {
+    clearInterval(sampleFlushTimer)
+    sampleFlushTimer = null
+  }
+  // 停机前把剩余样本落库
+  void flushSamples()
+}
 
 // ==================== 工具函数 ====================
 
@@ -390,6 +524,10 @@ function onDisconnected(reason: string, closeCode?: number): void {
   for (const ruleId of getRunningRuleIds()) {
     const monitor = state.monitors.get(ruleId);
     const rule = ruleCache.get(ruleId);
+    // goal_surge：记录进入波动窗口前的 bestBid 基准，供信号二（断联跳升）比较
+    if (rule?.ruleType === 'goal_surge' && monitor) {
+      monitor.preVolatileBid = priceCache.get(monitor.tokenId)?.bestBid ?? null;
+    }
     recordLog({
       ruleId,
       tokenId: monitor?.tokenId ?? '',
@@ -766,6 +904,16 @@ async function evaluateRuleForId(ruleId: number, snapshot: PriceSnapshot): Promi
   monitor.cyclesRun++;
   monitor.lastError = null;
 
+  // 采样落库（同步入缓冲，不影响下方临界区）
+  bufferPriceSample(rule, monitor, snapshot);
+
+  // 进球买入信号：独立状态机。不走 percent_change 的基准价/波动抑制逻辑，
+  // 断联/高波动窗口内照常评估（正是进球致重定价的时刻）。
+  if (rule.ruleType === 'goal_surge') {
+    await evaluateGoalSurgeForId(ruleId, rule, monitor, snapshot);
+    return;
+  }
+
   // 首次获取价格，设置基准价
   if (monitor.baselinePrice == null) {
     monitor.baselinePrice = currentPrice;
@@ -968,6 +1116,311 @@ function evaluatePriceRange(
   }
 }
 
+// ==================== 进球买入信号（goal_surge） ====================
+
+/**
+ * 合并 rule.goalSurgeParams 与全局默认值，得到完整参数。
+ * rule 未配置的字段回退 config.goalSurgeDefaults，再兜底硬编码常量。
+ */
+function resolveGoalSurgeParams(rule: PriceMonitorRule): Required<GoalSurgeParams> {
+  const d = state.config.goalSurgeDefaults ?? {}
+  const p = rule.goalSurgeParams ?? {}
+  return {
+    surgeWindowMs: p.surgeWindowMs ?? d.surgeWindowMs ?? 3_000,
+    surgeMinRise: p.surgeMinRise ?? d.surgeMinRise ?? 0.03,
+    jumpThreshold: p.jumpThreshold ?? d.jumpThreshold ?? 0.05,
+    minBidSize: p.minBidSize ?? d.minBidSize ?? 50,
+    minAskSize: p.minAskSize ?? d.minAskSize ?? 50,
+    askCeiling: p.askCeiling ?? d.askCeiling ?? 0.97,
+    confirmMin: p.confirmMin ?? d.confirmMin ?? 0.98,
+    confirmHoldMs: p.confirmHoldMs ?? d.confirmHoldMs ?? 2_000,
+  }
+}
+
+/** 把当前 tick 推入环形缓冲，并按窗口（放宽到 2×）+ 硬上限裁剪 */
+function pushGoalSurgeTick(
+  monitor: PriceMonitorState,
+  snapshot: PriceSnapshot,
+  windowMs: number,
+  now: number,
+): void {
+  if (!monitor.recentTicks) monitor.recentTicks = []
+  monitor.recentTicks.push({
+    t: now,
+    bid: snapshot.bestBid,
+    ask: snapshot.bestAsk,
+    mid: snapshot.lastPrice,
+    bidSize: snapshot.bestBidSize,
+    askSize: snapshot.bestAskSize,
+  })
+  const cutoff = now - Math.max(windowMs, 1_000) * 2
+  while (monitor.recentTicks.length && monitor.recentTicks[0].t < cutoff) {
+    monitor.recentTicks.shift()
+  }
+  // 硬上限，防止高频推送下内存膨胀
+  if (monitor.recentTicks.length > 200) {
+    monitor.recentTicks.splice(0, monitor.recentTicks.length - 200)
+  }
+}
+
+/**
+ * 信号一：秒级价格递增。
+ * 窗口内 bestBid 净涨 ≥ minRise，且相邻 tick 至少出现 2 次上抬
+ *（避免单跳噪声，要求是持续爬升）。
+ */
+function detectGoalSurgeSignal1(
+  monitor: PriceMonitorState,
+  now: number,
+  windowMs: number,
+  minRise: number,
+): boolean {
+  const ticks = (monitor.recentTicks ?? []).filter((t) => t.t >= now - windowMs && t.bid != null)
+  if (ticks.length < 2) return false
+  const first = ticks[0].bid as number
+  const last = ticks[ticks.length - 1].bid as number
+  if (last - first < minRise) return false
+  let ups = 0
+  for (let i = 1; i < ticks.length; i++) {
+    if ((ticks[i].bid as number) > (ticks[i - 1].bid as number)) ups++
+  }
+  return ups >= 2
+}
+
+interface GoalSurgeDecision {
+  fire: boolean
+  evaluation?: RuleEvaluation & { direction: PriceDirection }
+  reserve?: { limitPrice: number; askOk: boolean; profitOk: boolean; note: string }
+  confirm: 'confirmed' | 'failed' | null
+}
+
+/** 事后确认的总时限：信号发出后多久没持稳就判失败 */
+const GOAL_SURGE_CONFIRM_TIMEOUT_MS = 30_000
+
+/**
+ * 进球买入信号状态机（纯同步，推进 monitor 上的状态）。
+ *
+ * IDLE ──(信号一 秒级递增 或 信号二 断联跳升)──▶ CANDIDATE
+ * CANDIDATE ──(买单价↑ 且 买单量≥阈值)──▶ 发信号（立即，信号出现即买）；超时回 IDLE
+ * 另有独立的事后确认：信号发出后价格持稳在 [confirmMin,1.0) 达 confirmHoldMs → 已确认真实。
+ */
+function stepGoalSurge(
+  rule: PriceMonitorRule,
+  monitor: PriceMonitorState,
+  snapshot: PriceSnapshot,
+  now: number,
+): GoalSurgeDecision {
+  const p = resolveGoalSurgeParams(rule)
+  pushGoalSurgeTick(monitor, snapshot, p.surgeWindowMs, now)
+  if (monitor.goalSurgeState == null) monitor.goalSurgeState = 'idle'
+
+  const bid = snapshot.bestBid
+  const bidSize = snapshot.bestBidSize
+  const ask = snapshot.bestAsk
+  const askSize = snapshot.bestAskSize
+
+  // ---- 事后确认阶段（与检测状态机相互独立）----
+  let confirm: 'confirmed' | 'failed' | null = null
+  if (monitor.pendingConfirm) {
+    const ref = bid ?? snapshot.lastPrice
+    if (ref != null && ref >= 1.0) {
+      // 已结算到 1.0：概率到 100%，确认成立
+      confirm = 'confirmed'
+      monitor.pendingConfirm = null
+    } else if (ref != null && ref >= p.confirmMin) {
+      if (monitor.pendingConfirm.holdStartedAt == null) {
+        monitor.pendingConfirm.holdStartedAt = now
+      } else if (now - monitor.pendingConfirm.holdStartedAt >= p.confirmHoldMs) {
+        confirm = 'confirmed'
+        monitor.pendingConfirm = null
+      }
+    } else {
+      // 跌出持稳区间：重置持稳计时；超总时限判失败
+      monitor.pendingConfirm.holdStartedAt = undefined
+      if (now - monitor.pendingConfirm.signalTime > GOAL_SURGE_CONFIRM_TIMEOUT_MS) {
+        confirm = 'failed'
+        monitor.pendingConfirm = null
+      }
+    }
+  }
+
+  // ---- 检测状态机 ----
+  const signal1 = detectGoalSurgeSignal1(monitor, now, p.surgeWindowMs, p.surgeMinRise)
+  const signal2 =
+    isVolatileWindow() &&
+    monitor.preVolatileBid != null &&
+    bid != null &&
+    bid >= monitor.preVolatileBid + p.jumpThreshold
+  const sourceHit = signal1 || signal2
+
+  if (monitor.goalSurgeState === 'idle' && sourceHit) {
+    monitor.goalSurgeState = 'candidate'
+    monitor.candidateSince = now
+  }
+
+  let fire = false
+  let evaluation: (RuleEvaluation & { direction: PriceDirection }) | undefined
+  let reserve: GoalSurgeDecision['reserve']
+
+  if (monitor.goalSurgeState === 'candidate') {
+    // 买单门槛：买单价较基准抬升，且买单量达标（点3 信心 / 能否下单）
+    const firstBid = (monitor.recentTicks ?? []).find((t) => t.bid != null)?.bid ?? null
+    const refBid = signal2 && monitor.preVolatileBid != null ? monitor.preVolatileBid : firstBid
+    const bidRising = bid != null && (refBid == null || bid > refBid)
+    const bidSizeOk = bidSize != null && bidSize >= p.minBidSize
+    const candidateTimeout = Math.max(p.surgeWindowMs * 2, 5_000)
+
+    if (bid != null && bidRising && bidSizeOk) {
+      fire = true
+      // 卖单（ask）评估：能否成交 + 是否还有到 1.0 的利润空间
+      const askOk = askSize != null && askSize >= p.minAskSize
+      const profitOk = ask != null && ask <= p.askCeiling
+      reserve = {
+        limitPrice: bid, // 买入限价 = 当时 bestBid（买单挂单价），满足「买价 ≥ bestBid」
+        askOk,
+        profitOk,
+        note: `触发源=${[signal1 ? '信号一(秒级递增)' : '', signal2 ? '信号二(断联跳升)' : ''].filter(Boolean).join('+')}`,
+      }
+      const prevRef = refBid ?? bid
+      evaluation = {
+        triggered: true,
+        direction: 'up',
+        previousPrice: prevRef,
+        currentPrice: bid,
+        changePercent: prevRef > 0 ? (bid - prevRef) / prevRef : 0,
+        threshold: p.surgeMinRise,
+      }
+      // 发信号后回 idle，事后确认由 pendingConfirm 接管（在 evaluateGoalSurgeForId 内设置）
+      monitor.goalSurgeState = 'idle'
+      monitor.candidateSince = undefined
+    } else if (monitor.candidateSince != null && now - monitor.candidateSince > candidateTimeout) {
+      monitor.goalSurgeState = 'idle'
+      monitor.candidateSince = undefined
+    }
+  }
+
+  return { fire, evaluation, reserve, confirm }
+}
+
+/**
+ * goal_surge 的评估入口：推进状态机 + 冷却/去重写回（同步临界区），
+ * 随后异步落库信号 / 预留下单 / 事后确认。
+ */
+async function evaluateGoalSurgeForId(
+  ruleId: number,
+  rule: PriceMonitorRule,
+  monitor: PriceMonitorState,
+  snapshot: PriceSnapshot,
+): Promise<void> {
+  // ===== 同步临界区（await 之前完成所有状态写回）=====
+  const now = Date.now()
+  const decision = stepGoalSurge(rule, monitor, snapshot, now)
+
+  let doFire = false
+  if (decision.fire && decision.evaluation && !monitor.triggerInFlight) {
+    const lastTriggerMs = monitor.lastTriggerTime ? new Date(monitor.lastTriggerTime).getTime() : 0
+    if (now - lastTriggerMs >= rule.cooldownSeconds * 1000) {
+      doFire = true
+      monitor.triggerInFlight = true
+      monitor.lastTriggerTime = new Date(now).toISOString()
+      monitor.triggerCount++
+      // 事后确认窗口：记录信号时刻，后续 tick 检测价格是否持稳到 confirmMin
+      monitor.pendingConfirm = { signalTime: now }
+    }
+  }
+  // ===== 临界区结束 =====
+
+  // 事后确认结果落库（confirmed / failed），与是否发新信号无关
+  if (decision.confirm) {
+    await recordGoalSurgeConfirm(rule, snapshot, decision.confirm).catch(() => {})
+  }
+
+  if (!doFire || !decision.evaluation) return
+
+  try {
+    await handleTrigger(rule, decision.evaluation, snapshot)
+    await reserveBuyOrder(rule, snapshot, decision.reserve!)
+    console.log(
+      `[PriceBot] 规则 #${rule.id} 进球买入信号: ${rule.outcome} ` +
+      `bestBid=${snapshot.bestBid?.toFixed(4) ?? '?'} size=${snapshot.bestBidSize ?? '?'} ` +
+      `${decision.reserve?.note ?? ''}${snapshot.source === 'rest' ? ' [REST兜底]' : ''}`,
+    )
+  } finally {
+    monitor.triggerInFlight = false
+  }
+}
+
+/**
+ * 预留下单接口（占位 / dry-run）。
+ *
+ * 本期不真正下单（autoTradeEnabled 默认 false），只记录「拟下单」参数。
+ * 形状对齐 trading.ts 的 PlaceOrderParams（{market_id, token_id, side, size, price}），
+ * 买入限价 = 当时 bestBid，满足「买价 ≥ bestBid」。接入实盘时在此把 params 交给 placeOrder。
+ */
+async function reserveBuyOrder(
+  rule: PriceMonitorRule,
+  snapshot: PriceSnapshot,
+  reserve: { limitPrice: number; askOk: boolean; profitOk: boolean; note: string },
+): Promise<void> {
+  const params = {
+    market_id: rule.marketId,
+    token_id: rule.tokenId,
+    side: 'BUY' as const,
+    size: 0, // 占位：实际下单量由实盘接入时的资金 / 风控决定
+    price: reserve.limitPrice,
+  }
+
+  if (state.config.autoTradeEnabled) {
+    // 预留实盘下单入口（本期不启用）。接入时在此调用 placeOrder(params)。
+    console.warn('[PriceBot] autoTradeEnabled=true，但实盘下单尚未接入，仅记录预留订单')
+  }
+
+  await recordLog({
+    ruleId: rule.id!,
+    tokenId: rule.tokenId,
+    eventId: rule.eventId,
+    outcome: rule.outcome,
+    action: 'buy_signal',
+    price: reserve.limitPrice,
+    bestBid: snapshot.bestBid,
+    bestBidSize: snapshot.bestBidSize,
+    bestAsk: snapshot.bestAsk,
+    bestAskSize: snapshot.bestAskSize,
+    source: snapshot.source,
+    detail:
+      `[预留下单·${state.config.autoTradeEnabled ? '实盘' : 'DRY-RUN'}] BUY ${rule.outcome} ` +
+      `限价=${reserve.limitPrice.toFixed(4)}(≥bestBid) ` +
+      `卖单可成交=${reserve.askOk ? 'Y' : 'N'} 利润空间(ask≤上限)=${reserve.profitOk ? 'Y' : 'N'} ` +
+      `bestAsk=${snapshot.bestAsk?.toFixed(4) ?? '?'}/${snapshot.bestAskSize ?? '?'} ` +
+      `${reserve.note} params=${JSON.stringify(params)}`,
+  }).catch(() => {})
+}
+
+/** 事后确认结果落库：价格是否持稳在 confirmMin（点1「稳定在 98/99 视为识别成功」） */
+async function recordGoalSurgeConfirm(
+  rule: PriceMonitorRule,
+  snapshot: PriceSnapshot,
+  confirm: 'confirmed' | 'failed',
+): Promise<void> {
+  const ref = snapshot.bestBid ?? snapshot.lastPrice
+  await recordLog({
+    ruleId: rule.id!,
+    tokenId: rule.tokenId,
+    eventId: rule.eventId,
+    outcome: rule.outcome,
+    action: 'buy_signal',
+    price: snapshot.lastPrice,
+    bestBid: snapshot.bestBid,
+    bestBidSize: snapshot.bestBidSize,
+    bestAsk: snapshot.bestAsk,
+    bestAskSize: snapshot.bestAskSize,
+    source: snapshot.source,
+    detail:
+      confirm === 'confirmed'
+        ? `[买入信号·已确认真实] 价格持稳在 ${ref?.toFixed(4) ?? '?'}（≥confirmMin 或已结算 1.0），进球致重定价成立`
+        : `[买入信号·确认失败] 价格未在时限内持稳于 confirmMin，疑似假信号`,
+  })
+}
+
 // ==================== 触发处理 ====================
 
 /**
@@ -976,7 +1429,7 @@ function evaluatePriceRange(
 async function handleTrigger(
   rule: PriceMonitorRule,
   evaluation: RuleEvaluation & { direction: PriceDirection },
-  _snapshot: PriceSnapshot,
+  snapshot: PriceSnapshot,
 ): Promise<void> {
   // 根据规则配置的信号类型和触发方向确定具体信号
   let signal: string
@@ -1012,8 +1465,13 @@ async function handleTrigger(
     tokenId: rule.tokenId,
     eventId: rule.eventId,
     outcome: rule.outcome,
-    action: 'trigger',
+    action: rule.signalType === 'buy_signal' ? 'buy_signal' : 'trigger',
     price: evaluation.currentPrice,
+    bestBid: snapshot.bestBid,
+    bestBidSize: snapshot.bestBidSize,
+    bestAsk: snapshot.bestAsk,
+    bestAskSize: snapshot.bestAskSize,
+    source: snapshot.source,
     detail: `${signal} ${evaluation.direction} ${rule.outcome}, 价格 ${evaluation.previousPrice.toFixed(4)} → ${evaluation.currentPrice.toFixed(4)} (${(evaluation.changePercent * 100).toFixed(2)}%)`,
   }).catch(() => {})
 }
@@ -1092,6 +1550,9 @@ export async function startMonitor(ruleId: number): Promise<void> {
   // 刷新 WS 订阅（如果是新 token，需要加入订阅）
   // wantConnection=true：明确要求连接，清除此前 closeWs() 留下的主动关闭意图
   refreshWsSubscription(true)
+
+  // 规则可以脱离 startBot 单独启动，刷盘定时器在这里也要确保运行
+  startSampleFlush()
 }
 
 /** 停止单个规则监控 */
@@ -1156,8 +1617,12 @@ export async function startBot(config?: Partial<PriceBotConfig>): Promise<void> 
 
   // 统一建立 WS 连接
   connectWs()
+  startSampleFlush()
 
-  console.log(`[PriceBot] 机器人已启动，共 ${rules.length} 条规则`)
+  console.log(
+    `[PriceBot] 机器人已启动，共 ${rules.length} 条规则` +
+    `${state.config.samplePrices ? '，价格采样已开启' : ''}`,
+  )
 }
 
 /** 停止机器人（停止所有监控） */
@@ -1172,6 +1637,7 @@ export function stopBot(): void {
   state.config.enabled = false
   ruleCache.clear()
   closeWs()
+  stopSampleFlush()
 
   // 重置连接状态，避免下次启动时残留断联标记导致规则被误抑制
   connState.disconnected = false
@@ -1214,6 +1680,11 @@ export function getBotStatus() {
       volatileWindow: isVolatileWindow(),
       volatileUntil: connState.volatileUntil,
     },
+    sampling: {
+      enabled: state.config.samplePrices,
+      buffered: sampleBuffer.length,
+      dropped: sampleDropped,
+    },
   }
 }
 
@@ -1231,6 +1702,8 @@ export function getMonitorList() {
       baselinePrice: m.baselinePrice,
       lastTriggerTime: m.lastTriggerTime,
       lastPrice: m.lastPrice,
+      suppressedCount: m.suppressedCount ?? 0,
+      sampledCount: m.sampledCount ?? 0,
     })
   }
   return result
@@ -1305,8 +1778,10 @@ export function __injectPriceForTest(
   bestBid: number | null,
   bestAsk: number | null,
   source: 'ws' | 'rest' = 'ws',
+  bestBidSize: number | null = null,
+  bestAskSize: number | null = null,
 ): void {
-  updatePriceAndEvaluate(tokenId, bestBid, null, bestAsk, null, source)
+  updatePriceAndEvaluate(tokenId, bestBid, bestBidSize, bestAsk, bestAskSize, source)
 }
 
 /** 注册一个内存态监控（不读数据库），供测试使用 */
@@ -1335,9 +1810,13 @@ export function __getMonitorStateForTest(ruleId: number): PriceMonitorState | un
 }
 
 /** 强制进入/退出高波动窗口，供测试使用 */
-export function __setVolatileForTest(disconnected: boolean, volatileMs = 0): void {
+export function __setVolatileForTest(disconnected: boolean, volatileMs = 0, preVolatileBid?: number): void {
   connState.disconnected = disconnected
   connState.volatileUntil = volatileMs > 0 ? Date.now() + volatileMs : null
+  // 供信号二测试：把各 monitor 的「进入波动窗口前基准」设为给定值
+  if (preVolatileBid !== undefined) {
+    for (const m of state.monitors.values()) m.preVolatileBid = preVolatileBid
+  }
 }
 
 /** 清空测试状态 */
@@ -1351,6 +1830,13 @@ export function __resetForTest(): void {
   connState.volatileUntil = null
   connState.reconnectAttempts = 0
   connState.totalDisconnects = 0
+  sampleBuffer.length = 0
+  sampleDropped = 0
+}
+
+/** 把缓冲区采样立即落库，供测试与停机使用 */
+export async function __flushSamplesForTest(): Promise<void> {
+  await flushSamples()
 }
 
 // ==================== 规则 CRUD 导出 ====================
