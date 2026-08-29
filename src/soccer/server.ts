@@ -451,6 +451,38 @@ function parseJsonArray(val: unknown): string[] {
   return [];
 }
 
+/** 大小球盘口的合法总进球数线；超过 4.5 的线几乎无成交，不纳入递进 */
+const TOTAL_GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5];
+
+/** 递进的起点：批量创建只建这一档，更高的线等它打出后再接 */
+const FIRST_TOTAL_LINE = 0.5;
+
+/**
+ * 取出大小球盘口的总进球数线。非大小球盘或角球盘返回 null。
+ *
+ * 线可能存在于两处：DB 的 line 列（DECIMAL，mysql2 返回字符串），
+ * 或问题文本里的 "X.5"。平台并非所有大小球盘都填了 line 列，
+ * 故两处都取候选值，任一命中白名单即算有效，避免把有效盘口误杀。
+ *
+ * 角球盘要排除：classifyMarketType 把含 over/under 的角球盘也归入了 total，
+ * 而平台角球盘几乎无人交易。
+ */
+function extractTotalGoalLine(m: { question_en?: unknown; question_zh?: unknown; line?: unknown }): number | null {
+  const qEn = String(m.question_en ?? '').toLowerCase();
+  const qZh = String(m.question_zh ?? '');
+  if (qEn.includes('corner') || qZh.includes('角球')) return null;
+
+  const candidates: number[] = [];
+  if (m.line != null) {
+    const n = Number(m.line);
+    if (Number.isFinite(n)) candidates.push(n);
+  }
+  const qm = qEn.match(/(\d+\.5)(?!\d)/); // 大小球线恒为半整数：0.5/1.5/2.5...
+  if (qm) candidates.push(Number(qm[1]));
+
+  return candidates.find((n) => TOTAL_GOAL_LINES.includes(n)) ?? null;
+}
+
 app.get('/api/soccer/positions', asyncHandler(async (_req, res) => {
   // 包含所有已成交/部分成交/已结算的订单
   const [orders] = await pool.execute<any[]>(
@@ -1461,8 +1493,11 @@ app.post('/api/bots/price-bot/rules', asyncHandler(async (req, res) => {
 app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res) => {
   // 一键批量创建：取「即将开赛」的前 5 场（not_started，按临近开赛升序），
   // 对每场的 大小球(total) 盘口建 Over 监控、谁先进球(first_scorer) 盘口建 Yes 监控。
-  // 大小球只保留总进球数 0.5/1.5/2.5/3.5/4.5 线，排除角球及其他线（见下方过滤）。
-  // 全部为 goal_surge / direction=up / signalType=buy_signal，靠 uk_token_rule 唯一键天然去重。
+  //
+  // 大小球只建 0.5 这一条线（见 FIRST_TOTAL_LINE）。1.5 及以上在 0.5 未打出前
+  // 没有意义：0 球时 Over 1.5 的价格只是 Over 0.5 的影子，进球瞬间两者同涨，
+  // 监控它等于把同一个信号数了两遍，还平摊了额度。更高的线由「完结并开下一档」
+  // 在 0.5 打出后按需接上。
   const events = (await getEventsWithMarkets())
     .filter((e: any) => e.match_status === 'not_started')
     .slice(0, 5);
@@ -1473,8 +1508,6 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
   const skipped: Array<{
     eventId: string; marketId: string; marketType: string; line: number | null; reason: string;
   }> = [];
-  // 大小球只保留「总进球数」这几条线；其余线（如 5.5/6.5）与角球盘一律不建
-  const ALLOWED_TOTAL_LINES = new Set([0.5, 1.5, 2.5, 3.5, 4.5]);
 
   for (const ev of events) {
     const eventId = String((ev as any).id);
@@ -1483,25 +1516,8 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
       const marketType = String(m.market_type);
       if (marketType !== 'total' && marketType !== 'first_scorer') continue;
 
-      // 大小球(total)：只保留总进球数 0.5/1.5/2.5/3.5/4.5 线；排除角球盘。
-      // classifyMarketType 把含 over/under 的角球盘也归入了 total，
-      // 且平台角球盘几乎无人交易，故按「问题含 corner/角球」+「线不在白名单」双重剔除。
-      if (marketType === 'total') {
-        const qEn = String(m.question_en ?? '').toLowerCase();
-        const qZh = String(m.question_zh ?? '');
-        if (qEn.includes('corner') || qZh.includes('角球')) continue;
-        // 线可能存在于两处：DB 的 line 列（DECIMAL，mysql2 返回字符串），
-        // 或问题文本里的 "X.5"。平台并非所有大小球盘都填了 line 列，
-        // 故两处都取候选值，任一命中白名单即保留，避免把有效盘口误杀。
-        const candidates: number[] = [];
-        if (m.line != null) {
-          const n = Number(m.line);
-          if (Number.isFinite(n)) candidates.push(n);
-        }
-        const qm = qEn.match(/(\d+\.5)(?!\d)/); // 大小球线恒为半整数：0.5/1.5/2.5...
-        if (qm) candidates.push(Number(qm[1]));
-        if (!candidates.some((n) => ALLOWED_TOTAL_LINES.has(n))) continue;
-      }
+      // 大小球只取 0.5：非大小球线/角球盘由 extractTotalGoalLine 返回 null 而剔除
+      if (marketType === 'total' && extractTotalGoalLine(m) !== FIRST_TOTAL_LINE) continue;
 
       const wanted = marketType === 'total' ? 'over' : 'yes'; // 大小球监控 Over，首球监控 Yes
 
@@ -1538,6 +1554,127 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
   }
 
   res.json({ success: true, created, skipped, eventsScanned: events.length });
+}));
+
+/**
+ * 手动完结一个盘口，并可选地接上下一档。
+ *
+ * 为什么要手动而不等链上结算：Polymarket 的 Over 0.5 多在**比赛结束**才结算，
+ * 而不是进球那一刻。若等 gamma 的 closed=true 再开 1.5，整场比赛都用不上它。
+ * 你看到进球就点一下，这是最及时也最可靠的信号。
+ *
+ * 完结动作 = 停监控 + 禁用规则（不删除，触发记录和下单记录要留着对账）。
+ * next=true 时在同一场比赛里找下一档 total 盘口（0.5→1.5→2.5→3.5→4.5）建规则。
+ *
+ * 下一档继承当前规则的 goalSurgeParams 和 autoTradeParams，但**不继承授权开关**：
+ * autoTradeEnabled 一律为 false。递进可以自动，动钱不能自动——新盘口要你再点一次授权。
+ */
+app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const body = req.body || {};
+  const wantNext = body.next !== false; // 默认接下一档
+  const autoStart = body.startNext !== false; // 默认把下一档也启动监控
+
+  const rule = await getRule(id);
+  if (!rule) {
+    res.status(404).json({ success: false, error: '规则不存在' });
+    return;
+  }
+
+  // 先停监控再禁用：反过来的话监控还在跑，可能在禁用生效前又触发一次
+  stopMonitor(id);
+  await updateRule(id, { enabled: false, autoTradeEnabled: false });
+
+  const result: {
+    settled: { ruleId: number; line: number | null };
+    next: null | { ruleId: number; marketId: string; line: number; outcome: string; started: boolean };
+    reason?: string;
+  } = { settled: { ruleId: id, line: null }, next: null };
+
+  // 当前档：规则行上没有 line 列，要回查盘口
+  const [curRows] = await pool.execute<any[]>(
+    `SELECT question_en, question_zh, line, market_type FROM soccer_markets WHERE id = ?`,
+    [rule.marketId],
+  );
+  const curMarket = curRows[0];
+  const curLine = curMarket ? extractTotalGoalLine(curMarket) : null;
+  result.settled.line = curLine;
+
+  if (!wantNext) {
+    res.json({ success: true, ...result, reason: '仅完结，未创建下一档' });
+    return;
+  }
+  if (curMarket && String(curMarket.market_type) !== 'total') {
+    res.json({ success: true, ...result, reason: '非大小球盘口，无下一档可接' });
+    return;
+  }
+  if (curLine == null) {
+    res.json({ success: true, ...result, reason: '无法识别当前盘口的总进球数线' });
+    return;
+  }
+
+  const nextLine = TOTAL_GOAL_LINES[TOTAL_GOAL_LINES.indexOf(curLine) + 1];
+  if (nextLine == null) {
+    res.json({ success: true, ...result, reason: `${curLine} 已是最高档，无下一档` });
+    return;
+  }
+
+  // 在同一场比赛里找 nextLine 的 Over 盘口
+  const markets = await getMarketsForEvent(rule.eventId);
+  const target = markets.find(
+    (m) => String(m.market_type) === 'total' && extractTotalGoalLine(m) === nextLine,
+  );
+  if (!target) {
+    res.json({ success: true, ...result, reason: `本场未找到 Over ${nextLine} 盘口` });
+    return;
+  }
+
+  const outcomes = parseJsonArray(target.outcomes);
+  const tokens = parseJsonArray(target.clob_token_ids);
+  const idx = outcomes.findIndex((o) => String(o).trim().toLowerCase() === 'over');
+  if (idx < 0 || tokens[idx] == null) {
+    res.json({ success: true, ...result, reason: `Over ${nextLine} 盘口未匹配到 over outcome` });
+    return;
+  }
+
+  try {
+    const nextId = await createRule({
+      tokenId: String(tokens[idx]),
+      marketId: String(target.id),
+      eventId: rule.eventId,
+      outcome: String(outcomes[idx]),
+      ruleType: rule.ruleType,
+      direction: rule.direction,
+      signalType: rule.signalType,
+      cooldownSeconds: rule.cooldownSeconds,
+      goalSurgeParams: rule.goalSurgeParams,
+      // 参数继承，授权不继承：新盘口默认不下单
+      autoTradeParams: rule.autoTradeParams,
+      autoTradeEnabled: false,
+      enabled: true,
+    });
+    let started = false;
+    if (autoStart) {
+      try {
+        await startMonitor(nextId);
+        started = true;
+      } catch (err: any) {
+        console.error(`[PriceBot] 下一档 ${nextId} 启动监控失败:`, err?.message ?? err);
+      }
+    }
+    result.next = {
+      ruleId: nextId, marketId: String(target.id), line: nextLine,
+      outcome: String(outcomes[idx]), started,
+    };
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    // 规则已存在（uk_token_rule）不算失败：可能之前手工建过，直接把它启用起来
+    if (/duplicate|ER_DUP_ENTRY/i.test(err?.message || '')) {
+      res.json({ success: true, ...result, reason: `Over ${nextLine} 规则已存在` });
+      return;
+    }
+    res.json({ success: true, ...result, reason: `创建下一档失败: ${err?.message ?? 'unknown'}` });
+  }
 }));
 
 app.put('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {

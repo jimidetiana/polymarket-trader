@@ -1090,6 +1090,29 @@ export async function quickCreatePriceBotRules(): Promise<QuickCreateResult> {
   })
 }
 
+/**
+ * 手动完结一个盘口，可选接上下一档。
+ *
+ * 不等链上结算：Over 0.5 多在比赛结束才结算，等它就整场用不上 1.5。
+ * 看到进球点一下最及时。next=false 则只完结不递进。
+ */
+export interface SettleRuleResult {
+  success: boolean
+  settled: { ruleId: number; line: number | null }
+  next: null | { ruleId: number; marketId: string; line: number; outcome: string; started: boolean }
+  reason?: string
+}
+
+export async function settlePriceBotRule(
+  id: number,
+  opts: { next?: boolean; startNext?: boolean } = {},
+): Promise<SettleRuleResult> {
+  return await request<SettleRuleResult>(`/api/bots/price-bot/rules/${id}/settle`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  })
+}
+
 export async function updatePriceBotRule(id: number, rule: Partial<PriceMonitorRule>): Promise<PriceMonitorRule> {
   const data = await request<{ rule: PriceMonitorRule }>(`/api/bots/price-bot/rules/${id}`, {
     method: 'PUT',

@@ -3,7 +3,7 @@ import {
   Play, Pause, Zap, Settings, Activity, RefreshCw, Plus, Trash2,
   TrendingUp, TrendingDown, Bell, Radio, FileText,
   ChevronDown, ChevronUp, ChevronRight, LineChart,
-  ShoppingCart, ShieldAlert,
+  ShoppingCart, ShieldAlert, CheckCircle2,
 } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { cn } from '@/lib/utils'
@@ -32,6 +32,7 @@ import {
   setRuleAutoTrade,
   setAutoTradeBatch,
   fetchAutoOrders,
+  settlePriceBotRule,
   type PriceBotStatus,
   type PriceMonitorRule,
   type PriceMonitorState,
@@ -463,6 +464,38 @@ export default function PriceBotPage() {
     }
   }
 
+  /**
+   * 手动完结盘口，并按需接上下一档。
+   *
+   * 不等链上结算：Over 0.5 多在比赛结束才结算，等它就整场用不上 1.5。
+   * 二次确认里说清下一档默认不授权下单，避免误以为递进出来的盘口会自动买。
+   */
+  async function handleSettleRule(rule: PriceMonitorRule) {
+    if (rule.id == null) return
+    const label = primaryTitleOf(rule)
+    if (!confirm(
+      `完结「${label}」？\n\n` +
+      `· 停止监控并禁用该规则（记录保留）\n` +
+      `· 自动接上同场下一档大小球盘口并开始监控\n` +
+      `· 下一档默认不授权自动下单，需要你再点一次「授权下单」`
+    )) return
+    try {
+      const r = await settlePriceBotRule(rule.id, { next: true, startNext: true })
+      await Promise.all([loadRules(), loadMonitors(), loadAutoTrade()])
+      if (r.next) {
+        alert(
+          `已完结 Over ${r.settled.line ?? '?'}，接上 Over ${r.next.line}` +
+          `（${r.next.started ? '已开始监控' : '创建成功但未能启动监控，请手动启动'}）\n\n` +
+          `新盘口未授权自动下单。`
+        )
+      } else {
+        alert(`已完结。${r.reason ?? '未创建下一档'}`)
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   /** 批量授权/取消授权所有已启用盘口 */
   async function handleBatchAutoTrade(enabled: boolean) {
     if (autoTradeBusy) return
@@ -735,6 +768,7 @@ export default function PriceBotPage() {
               onMonitorAction={handleMonitorAction}
               onToggleRule={handleToggleRule}
               onToggleAutoTrade={handleToggleRuleAutoTrade}
+              onSettleRule={handleSettleRule}
               onDeleteRule={handleDeleteRule}
               onRefreshDetail={() => selectedRule.id != null && loadBotData(selectedRule.id)}
               globalAutoTrade={autoTrade?.globalEnabled ?? false}
@@ -837,6 +871,7 @@ function BotDetail({
   onMonitorAction,
   onToggleRule,
   onToggleAutoTrade,
+  onSettleRule,
   onDeleteRule,
   onRefreshDetail,
   globalAutoTrade,
@@ -849,6 +884,7 @@ function BotDetail({
   onMonitorAction: (ruleId: number, action: 'start' | 'stop' | 'trigger') => void
   onToggleRule: (rule: PriceMonitorRule) => void
   onToggleAutoTrade: (rule: PriceMonitorRule) => void
+  onSettleRule: (rule: PriceMonitorRule) => void
   onDeleteRule: (id: number) => void
   onRefreshDetail: () => void
   /** 全局总开关状态，用于提示「盘口已开但总开关关着」 */
@@ -951,6 +987,15 @@ function BotDetail({
             >
               <Zap className="h-3.5 w-3.5" />
               触发
+            </button>
+            {/* 进球后手动完结：不等链上结算，直接接上下一档 */}
+            <button
+              onClick={() => onSettleRule(rule)}
+              className="flex items-center gap-1 rounded-md border border-blue-500/40 px-2 py-1 text-sm text-blue-600 hover:bg-blue-500/10"
+              title="该盘口已出结果：停止监控并接上同场下一档大小球盘口"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              完结并开下一档
             </button>
             <button
               onClick={() => onToggleRule(rule)}
