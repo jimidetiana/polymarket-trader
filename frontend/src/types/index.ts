@@ -9,7 +9,10 @@ export interface SoccerEvent {
   league?: string | null
   end_time?: string | null
   match_status?: 'not_started' | 'live' | 'ended' | string
+  /** 全场累计成交额（USDC），所有盘口合计 */
   volume?: number | string | null
+  /** 全场当前挂单深度（USDC），所有盘口合计 */
+  liquidity?: number | string | null
   [key: string]: unknown
 }
 
@@ -23,6 +26,10 @@ export interface SoccerMarket {
   outcomes?: string[]
   outcome_prices?: (number | string | null)[]
   clob_token_ids?: (string | null)[]
+  /** 该盘口累计成交额（USDC），判断冷热用 */
+  volume?: number | string | null
+  /** 该盘口当前挂单深度（USDC），判断下不下得进去用 */
+  liquidity?: number | string | null
   [key: string]: unknown
 }
 

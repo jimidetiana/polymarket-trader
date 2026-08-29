@@ -3,7 +3,7 @@ import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, Che
 import { Layout } from '@/components/layout'
 import { SdkOrderBookAdapter } from '@/components/sdk-order-book'
 import { OrderForm } from '@/components/order-form'
-import { cn, formatTime, formatPercent, formatUsdc } from '@/lib/utils'
+import { cn, formatTime, formatPercent, formatUsdc, formatVolume } from '@/lib/utils'
 import {
   fetchEvents,
   refreshEvents,
@@ -413,8 +413,14 @@ export default function SoccerPage() {
                       </p>
                     )}
                     <p className="mt-0.5 text-xs text-muted-foreground">
-                      {selectedEvent.league || '足球'} · {formatTime(selectedEvent.end_time)} ·{' '}
-                      <StatusBadge status={selectedEvent.match_status || 'not_started'} />
+                      {selectedEvent.league || '足球'} · {formatTime(selectedEvent.end_time)}
+                      {selectedEvent.volume != null && (
+                        <> · 全场成交 {formatVolume(selectedEvent.volume)}</>
+                      )}
+                      {selectedEvent.liquidity != null && (
+                        <> · 挂单 {formatVolume(selectedEvent.liquidity)}</>
+                      )}{' '}
+                      · <StatusBadge status={selectedEvent.match_status || 'not_started'} />
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground">
@@ -725,6 +731,7 @@ function MatchCard({
             )}
             <p className="truncate text-[10px] text-muted-foreground">
               {event.league || '足球'} · {formatTime(event.end_time)}
+              {event.volume != null && ` · 成交 ${formatVolume(event.volume)}`}
             </p>
           </div>
         </div>
@@ -942,6 +949,23 @@ function MarketCard({
             {market.line !== null && market.line !== undefined && (
               <span className="inline-flex rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                 盘口 {market.line}
+              </span>
+            )}
+            {/* 成交额判冷热，挂单深度判下不下得进去——两个数不能互相替代 */}
+            {market.volume != null && (
+              <span
+                className="inline-flex rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                title="该盘口累计成交额"
+              >
+                成交 {formatVolume(market.volume)}
+              </span>
+            )}
+            {market.liquidity != null && (
+              <span
+                className="inline-flex rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                title="该盘口当前挂单深度"
+              >
+                挂单 {formatVolume(market.liquidity)}
               </span>
             )}
           </div>

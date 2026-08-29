@@ -43,6 +43,19 @@ export function formatUsdc(amount: number | string | null | undefined, decimals 
   })
 }
 
+/**
+ * 成交额/流动性金额显示，带 $ 前缀并按 K/M 缩写。
+ *
+ * 缺数据返回 '—' 而不是 '$0'：盘口真的零成交，和接口没给这个字段，
+ * 是两件不同的事，混在一起看不出来。
+ */
+export function formatVolume(n: number | string | null | undefined): string {
+  if (n === null || n === undefined || n === '') return '—'
+  const num = Number(n)
+  if (!Number.isFinite(num)) return '—'
+  return `$${formatNumber(num)}`
+}
+
 export function clamp(num: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, num))
 }
