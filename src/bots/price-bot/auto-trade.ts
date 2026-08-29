@@ -9,6 +9,13 @@ import { DEFAULT_AUTO_TRADE } from './types.js'
 import type { AutoTradeParams, PriceSnapshot, PriceMonitorRule } from './types.js'
 
 /**
+ * 与足球赛事页面手动下单表单保持一致的下限（order-form.tsx）。
+ * 那条路径是已验证能成交的，这里不另立标准。
+ */
+export const MIN_ORDER_SHARES = 5
+export const MIN_ORDER_NOTIONAL = 1
+
+/**
  * 合并全局默认与规则级覆盖，得到本次下单的有效参数。
  *
  * 优先级：规则级 > 全局配置 > 内置默认。
@@ -73,7 +80,9 @@ export function computeBuyLimitPrice(
   const aligned = alignPriceUp(raw, p.tickSize)
   // 价格必须严格小于 1（placeOrder 会拒 price>=1），留一个 tick 的余量
   const capped = Math.min(aligned, 1 - p.tickSize)
-  return { price: Number(capped.toFixed(4)), basis }
+  // 精度跟随 tick：0.01 tick 出两位小数，与手动表单的 limitPrice/100 同口径
+  const decimals = Math.max(0, Math.ceil(-Math.log10(p.tickSize)))
+  return { price: Number(capped.toFixed(decimals)), basis }
 }
 
 /**
@@ -81,12 +90,18 @@ export function computeBuyLimitPrice(
  *
  * sizeMode=usdc 时 baseSize 是金额，份数 = 金额 / 限价；
  * sizeMode=shares 时 baseSize 直接是份数。两种口径都受 maxSize 封顶。
- * CLOB 份数精度 2 位，向下截断以保证名义金额不超预算。
+ *
+ * 取整数份，与足球页面手动表单一致（order-form.tsx:57 用 parseInt / Math.floor）。
+ * 向下截断而不是四舍五入，保证名义金额不超预算。
+ * 返回 0 表示这笔算不出合法规模，调用方应跳过而不是凑到下限——
+ * 凑数会突破用户设定的金额上限。
  */
 export function computeOrderSize(price: number, p: Required<AutoTradeParams>): number {
   if (!(price > 0)) return 0
   const capped = Math.min(p.baseSize, p.maxSize)
   const raw = p.sizeMode === 'usdc' ? capped / price : capped
-  const size = Math.floor(raw * 100) / 100
-  return size > 0 ? size : 0
+  const size = Math.floor(raw)
+  if (size < MIN_ORDER_SHARES) return 0
+  if (size * price < MIN_ORDER_NOTIONAL) return 0
+  return size
 }

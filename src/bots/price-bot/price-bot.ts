@@ -43,6 +43,8 @@ import {
   resolveAutoTradeParams,
   computeBuyLimitPrice,
   computeOrderSize,
+  MIN_ORDER_SHARES,
+  MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
 import { DEFAULT_CONFIG, DEFAULT_AUTO_TRADE } from './types.js';
 import type {
@@ -1500,7 +1502,8 @@ async function reserveBuyOrder(
   const size = computeOrderSize(priced.price, p)
   if (!(size > 0)) {
     await finish('skipped', priced.price, 0,
-      `换算后份数为 0（规模=${Math.min(p.baseSize, p.maxSize)} ${p.sizeMode}）`)
+      `规模=${Math.min(p.baseSize, p.maxSize)} ${p.sizeMode} 在限价${priced.price} 下` +
+      `凑不满最低 ${MIN_ORDER_SHARES} 份 / $${MIN_ORDER_NOTIONAL}`)
     return
   }
 

@@ -70,11 +70,28 @@ test('负缓冲被归零，不会低于 ask 挂成永不成交的单', () => {
   assert.equal(r!.price, 0.62)
 })
 
-test('usdc 口径：份数 = 金额/限价，向下截断且名义额不超预算', () => {
+test('usdc 口径：份数 = 金额/限价，取整数份且名义额不超预算', () => {
   const p = P({ sizeMode: 'usdc', baseSize: 20, maxSize: 50 })
   const size = computeOrderSize(0.64, p)
-  assert.equal(size, 31.25)
+  // 20/0.64 = 31.25，取整数份 31（与足球页面手动表单同口径）
+  assert.equal(size, 31)
+  assert.ok(Number.isInteger(size), '份数必须是整数')
   assert.ok(0.64 * size <= 20 + 1e-9, '名义金额不得超过设定的下单金额')
+})
+
+test('份数一律取整，不出现小数份', () => {
+  for (const price of [0.07, 0.33, 0.64, 0.91, 0.96]) {
+    const size = computeOrderSize(price, P({ sizeMode: 'usdc', baseSize: 20, maxSize: 50 }))
+    assert.ok(Number.isInteger(size), `限价 ${price} 下份数 ${size} 不是整数`)
+  }
+})
+
+test('凑不满最低 5 份时返回 0，而不是凑数突破金额上限', () => {
+  // 3 USDC @ 0.96 只能买 3 份，低于手动表单的 5 份下限
+  assert.equal(computeOrderSize(0.96, P({ sizeMode: 'usdc', baseSize: 3, maxSize: 50 })), 0)
+  assert.equal(computeOrderSize(0.5, P({ sizeMode: 'shares', baseSize: 4, maxSize: 50 })), 0)
+  // 刚好 5 份且名义额 ≥ $1 时放行
+  assert.equal(computeOrderSize(0.5, P({ sizeMode: 'shares', baseSize: 5, maxSize: 50 })), 5)
 })
 
 test('shares 口径：baseSize 直接是份数', () => {

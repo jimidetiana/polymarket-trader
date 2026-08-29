@@ -1375,6 +1375,10 @@ function AutoTradePanel({
         </label>
         <NumField label={`标准下单规模（${unit}）`} value={draft.baseSize} onChange={(v) => set('baseSize', v)} step={1} />
         <NumField label={`单笔最大规模（${unit}）`} value={draft.maxSize} onChange={(v) => set('maxSize', v)} step={1} />
+        <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
+          份数取整数，最少 5 份且名义额不低于 $1（与手动下单表单一致）。
+          {draft.sizeMode === 'usdc' && ' 按金额下单时，金额 ÷ 限价折算份数后向下取整，凑不满 5 份的会跳过。'}
+        </p>
         <NumField label="穿价缓冲" value={draft.slippageBuffer} onChange={(v) => set('slippageBuffer', v)} step={0.01} />
         <NumField label="买入价上限" value={draft.maxBuyPrice} onChange={(v) => set('maxBuyPrice', v)} step={0.01} />
         <NumField label="每盘口最多笔数" value={draft.maxOrdersPerRule} onChange={(v) => set('maxOrdersPerRule', v)} step={1} />
