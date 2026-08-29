@@ -424,7 +424,8 @@ export default function PriceBotPage() {
         `已授权盘口：${n} 个${n === 0 ? '（当前没有盘口开启，不会有任何下单）' : ''}\n` +
         `标准规模：${d?.baseSize ?? '?'} ${d?.sizeMode === 'usdc' ? 'USDC' : '份'}\n` +
         `单笔上限：${d?.maxSize ?? '?'} / 每盘口 ${d?.maxOrdersPerRule ?? '?'} 笔 / 每日 ${d?.maxOrdersPerDay ?? '?'} 笔\n` +
-        `每日名义额上限：${d?.maxDailyNotional ?? '?'} USDC\n\n` +
+        `每日名义额上限：${d?.maxDailyNotional ?? '?'} USDC\n` +
+        `买入价区间：${d?.minBuyPrice ?? 0} ~ ${d?.maxBuyPrice ?? '?'}，价差上限 ${d?.maxSpread ?? 0}\n\n` +
         `确认开启？`,
       )
       if (!ok) return
@@ -1422,10 +1423,18 @@ function AutoTradePanel({
         <NumField label={`单笔最大规模（${unit}）`} value={draft.maxSize} onChange={(v) => set('maxSize', v)} step={1} />
         <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
           份数取整数，最少 5 份且名义额不低于 $1（与手动下单表单一致）。
-          {draft.sizeMode === 'usdc' && ' 按金额下单时，金额 ÷ 限价折算份数后向下取整，凑不满 5 份的会跳过。'}
+          标准规模不够一手时会自动补到 5 份，但不会越过「单笔最大规模」——
+          所以单笔上限至少要留出 5 × 限价（0.95 的盘口约 $4.75），否则一单也下不出去。
         </p>
         <NumField label="穿价缓冲" value={draft.slippageBuffer} onChange={(v) => set('slippageBuffer', v)} step={0.01} />
         <NumField label="买入价上限" value={draft.maxBuyPrice} onChange={(v) => set('maxBuyPrice', v)} step={0.01} />
+        <NumField label="买入价下限" value={draft.minBuyPrice} onChange={(v) => set('minBuyPrice', v)} step={0.05} />
+        <NumField label="最大买卖价差" value={draft.maxSpread} onChange={(v) => set('maxSpread', v)} step={0.01} />
+        <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
+          买入价下限是防误买的关键：一个进球会把 0.5/1.5/2.5/3.5 各档一起抬起来，
+          Over 3.5 从 0.05 涨到 0.09 涨幅同样过阈值，但这条线离结算还很远。
+          只买 0.6 以上的盘口，等于只买「这条线刚刚打出」的形态。设 0 关闭校验。
+        </p>
         <NumField label="每盘口最多笔数" value={draft.maxOrdersPerRule} onChange={(v) => set('maxOrdersPerRule', v)} step={1} />
         <NumField label="每日最多笔数" value={draft.maxOrdersPerDay} onChange={(v) => set('maxOrdersPerDay', v)} step={1} />
         <NumField label="每日金额上限（USDC）" value={draft.maxDailyNotional} onChange={(v) => set('maxDailyNotional', v)} step={10} />

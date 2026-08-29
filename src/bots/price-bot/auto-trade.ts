@@ -93,15 +93,59 @@ export function computeBuyLimitPrice(
  *
  * 取整数份，与足球页面手动表单一致（order-form.tsx:57 用 parseInt / Math.floor）。
  * 向下截断而不是四舍五入，保证名义金额不超预算。
- * 返回 0 表示这笔算不出合法规模，调用方应跳过而不是凑到下限——
- * 凑数会突破用户设定的金额上限。
+ *
+ * baseSize 不够一手时会向上补到最低 5 份，但绝不越过 maxSize——
+ * baseSize 是「想下多少」，maxSize 才是「最多能下多少」。
+ * 实测 baseSize=3 usdc 在限价 0.95 下算出 3 份，卡在 5 份下限上一单也下不出去；
+ * 补到 5 份需 4.75 usdc，只要不超 maxSize 就该放行，否则参数配小了等于静默停机。
+ * 返回 0 表示连 maxSize 都撑不起一手，此时跳过才是对的。
  */
 export function computeOrderSize(price: number, p: Required<AutoTradeParams>): number {
   if (!(price > 0)) return 0
-  const capped = Math.min(p.baseSize, p.maxSize)
-  const raw = p.sizeMode === 'usdc' ? capped / price : capped
-  const size = Math.floor(raw)
-  if (size < MIN_ORDER_SHARES) return 0
-  if (size * price < MIN_ORDER_NOTIONAL) return 0
-  return size
+
+  const target = Math.min(p.baseSize, p.maxSize)
+  const toShares = (v: number) => (p.sizeMode === 'usdc' ? v / price : v)
+
+  const wanted = Math.floor(toShares(target))
+  if (wanted >= MIN_ORDER_SHARES && wanted * price >= MIN_ORDER_NOTIONAL) return wanted
+
+  // 补到下限：份数取 5 份与 $1 两个下限里更严的那个
+  const floorShares = Math.max(MIN_ORDER_SHARES, Math.ceil(MIN_ORDER_NOTIONAL / price))
+  // 硬帽同样要换成份数比：usdc 口径下 maxSize 是钱，shares 口径下就是份
+  const hardCapShares = Math.floor(toShares(p.maxSize))
+  if (floorShares > hardCapShares) return 0
+  return floorShares
+}
+
+/**
+ * 下单前的盘口质量闸：价格是否落在可买区间、盘口是否够厚。
+ *
+ * 判定用 bestBid（市场共识价）而不是穿价后的限价：限价含我们自己加的缓冲，
+ * 拿它比下限等于把自己的让步算成市场认可度。
+ * 返回 null 表示通过，否则返回中文原因，直接进 price_bot_orders.reason。
+ */
+export function evaluateBookQuality(
+  snapshot: Pick<PriceSnapshot, 'bestBid' | 'bestAsk'>,
+  p: Required<AutoTradeParams>,
+): string | null {
+  const { bestBid, bestAsk } = snapshot
+  const floor = p.minBuyPrice ?? 0
+
+  if (floor > 0) {
+    // 缺 bid 时退而用 ask 判定，两者都没有交给定价环节报「无法定价」
+    const ref = bestBid ?? bestAsk
+    if (ref != null && ref < floor) {
+      return `盘口价${ref.toFixed(4)} < 下限${floor}，该线离结算尚远（涨幅多来自更低档的线或薄盘噪音）`
+    }
+  }
+
+  const maxSpread = p.maxSpread ?? 0
+  if (maxSpread > 0 && bestBid != null && bestAsk != null && bestBid > 0) {
+    const spread = bestAsk - bestBid
+    if (spread > maxSpread) {
+      return `买卖价差${spread.toFixed(4)} > 上限${maxSpread}，盘口过薄，穿价买入会显著溢价`
+    }
+  }
+
+  return null
 }

@@ -43,6 +43,7 @@ import {
   resolveAutoTradeParams,
   computeBuyLimitPrice,
   computeOrderSize,
+  evaluateBookQuality,
   MIN_ORDER_SHARES,
   MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
@@ -1498,12 +1499,26 @@ async function reserveBuyOrder(
     return
   }
 
+  // ---- 盘口质量：价格下限 + 价差上限 ----
+  // 放在规模换算之前：这两项否掉的是「这一单压根不该下」，
+  // 先算份数再否等于白算，而且 reason 里会混进无关的份数信息。
+  const quality = evaluateBookQuality(snapshot, p)
+  if (quality) {
+    await finish('skipped', priced.price, 0, quality)
+    return
+  }
+
   // ---- 规模换算：usdc 口径按限价折成份数 ----
   const size = computeOrderSize(priced.price, p)
   if (!(size > 0)) {
+    // 报出「要多少才够」而不是只说不够：maxSize 是硬帽，调它才有用
+    const needShares = Math.max(MIN_ORDER_SHARES, Math.ceil(MIN_ORDER_NOTIONAL / priced.price))
+    const need = p.sizeMode === 'usdc'
+      ? `$${(needShares * priced.price).toFixed(2)}`
+      : `${needShares} 份`
     await finish('skipped', priced.price, 0,
-      `规模=${Math.min(p.baseSize, p.maxSize)} ${p.sizeMode} 在限价${priced.price} 下` +
-      `凑不满最低 ${MIN_ORDER_SHARES} 份 / $${MIN_ORDER_NOTIONAL}`)
+      `限价${priced.price} 下最低 ${MIN_ORDER_SHARES} 份需 ${need}，` +
+      `超出单笔上限 maxSize=${p.maxSize} ${p.sizeMode}`)
     return
   }
 

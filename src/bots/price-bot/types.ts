@@ -53,6 +53,22 @@ export interface AutoTradeParams {
   slippageBuffer?: number
   /** 买入价硬上限：算出来的限价超过该值就放弃（保住到 1.0 的利润空间） */
   maxBuyPrice?: number
+  /**
+   * 买入价硬下限（对 bestBid 判定）：盘口价低于该值就放弃。
+   *
+   * 进球买入的前提是「这条线刚刚打出，价格正奔向 1.0」。若买单价还在低位，
+   * 说明这条线离结算很远——涨幅大概率来自更低档的线（0 球时进 1 球，
+   * Over 3.5 也会从 0.05 抬到 0.09，涨幅照样过阈值）或是薄盘噪音。
+   * 只有下限没上限会买到没利润空间的价，只有上限没下限会买到远未结算的线。
+   */
+  minBuyPrice?: number
+  /**
+   * 最大可接受买卖价差（bestAsk - bestBid）。超过就放弃。
+   *
+   * 限价是按 bestAsk 穿价算的，盘口一薄（挂单稀疏或对手盘被吃空）
+   * ask 会远离真实价值，照它下单等于按天价接货。
+   */
+  maxSpread?: number
   /** 每条规则累计最多下单笔数（跨重启，从库里数） */
   maxOrdersPerRule?: number
   /** 全局每日最多下单笔数（跨重启，按自然日 UTC 数） */
@@ -71,6 +87,10 @@ export const DEFAULT_AUTO_TRADE: Required<AutoTradeParams> = {
   slippageBuffer: 0.02,
   // 0.97 以上买入到 1.0 的空间已不足 3%，扣掉滑点不值得。
   maxBuyPrice: 0.97,
+  // 0.60 以下说明市场认为这条线还有四成以上概率不成立，不是「刚打出」的形态。
+  minBuyPrice: 0.6,
+  // 0.10 已是正常价差的数倍，再宽就是薄盘。
+  maxSpread: 0.1,
   maxOrdersPerRule: 2,
   maxOrdersPerDay: 20,
   maxDailyNotional: 200,

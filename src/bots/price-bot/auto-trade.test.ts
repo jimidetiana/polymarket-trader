@@ -11,6 +11,7 @@ import {
   alignPriceUp,
   computeBuyLimitPrice,
   computeOrderSize,
+  evaluateBookQuality,
   resolveAutoTradeParams,
 } from './auto-trade.js'
 import { DEFAULT_AUTO_TRADE } from './types.js'
@@ -86,12 +87,26 @@ test('份数一律取整，不出现小数份', () => {
   }
 })
 
-test('凑不满最低 5 份时返回 0，而不是凑数突破金额上限', () => {
-  // 3 USDC @ 0.96 只能买 3 份，低于手动表单的 5 份下限
-  assert.equal(computeOrderSize(0.96, P({ sizeMode: 'usdc', baseSize: 3, maxSize: 50 })), 0)
-  assert.equal(computeOrderSize(0.5, P({ sizeMode: 'shares', baseSize: 4, maxSize: 50 })), 0)
-  // 刚好 5 份且名义额 ≥ $1 时放行
+test('baseSize 不够一手时补到最低 5 份（maxSize 还有空间）', () => {
+  // 现场原案：3 usdc @ 0.95 折出 3 份，卡在 5 份下限上一单也下不出去。
+  // maxSize=50 撑得起 5 份（4.75 usdc），就该补上去而不是静默跳过。
+  assert.equal(computeOrderSize(0.95, P({ sizeMode: 'usdc', baseSize: 3, maxSize: 50 })), 5)
+  assert.equal(computeOrderSize(0.5, P({ sizeMode: 'shares', baseSize: 4, maxSize: 50 })), 5)
+  // 刚好 5 份时按 5 份走，不多补
   assert.equal(computeOrderSize(0.5, P({ sizeMode: 'shares', baseSize: 5, maxSize: 50 })), 5)
+})
+
+test('补到下限也不越过 maxSize 硬帽，撑不起就返回 0', () => {
+  // baseSize=maxSize=3 usdc：5 份要 4.75，超过硬帽，只能放弃
+  assert.equal(computeOrderSize(0.95, P({ sizeMode: 'usdc', baseSize: 3, maxSize: 3 })), 0)
+  assert.equal(computeOrderSize(0.5, P({ sizeMode: 'shares', baseSize: 4, maxSize: 4 })), 0)
+  // 硬帽刚好够 5 份就放行
+  assert.equal(computeOrderSize(0.95, P({ sizeMode: 'usdc', baseSize: 3, maxSize: 4.75 })), 5)
+})
+
+test('低价盘口补份数按 $1 名义额下限走，而不是只看 5 份', () => {
+  // 0.05 下 5 份只有 $0.25，不满 $1；要 20 份才够
+  assert.equal(computeOrderSize(0.05, P({ sizeMode: 'shares', baseSize: 5, maxSize: 100 })), 20)
 })
 
 test('shares 口径：baseSize 直接是份数', () => {
@@ -161,4 +176,39 @@ test('参数优先级：规则级 > 全局 > 内置默认', () => {
   assert.equal(p.baseSize, 5, '规则级覆盖全局')
   assert.equal(p.maxOrdersPerDay, 7, '全局覆盖内置默认')
   assert.equal(p.maxBuyPrice, DEFAULT_AUTO_TRADE.maxBuyPrice, '未指定的回退内置默认')
+})
+
+// ==================== 盘口质量闸 ====================
+
+test('低价线的涨幅不给下单：Over 3.5 从 0.05 抬到 0.09 也要拦住', () => {
+  // 现场原案（内卡萨 vs 蓝十字 3.5 误买入）：一个进球把所有档位一起抬起来，
+  // 涨幅过阈值但这条线离结算还很远。
+  const reason = evaluateBookQuality(snap(0.09, 0.11), P())
+  assert.ok(reason, '应当被拦下')
+  assert.match(reason!, /下限/)
+})
+
+test('0 球时的 Over 1.5 不给下单（价格在中段说明尚未打出）', () => {
+  assert.ok(evaluateBookQuality(snap(0.45, 0.47), P()))
+})
+
+test('刚打出的线放行：0.9x 且价差正常', () => {
+  assert.equal(evaluateBookQuality(snap(0.93, 0.95), P()), null)
+})
+
+test('价差过宽判薄盘，拦下穿价溢价', () => {
+  // bid/ask 都在下限之上，但差了 0.25：按 ask 穿价等于按天价接货
+  const reason = evaluateBookQuality(snap(0.7, 0.95), P())
+  assert.ok(reason)
+  assert.match(reason!, /价差/)
+})
+
+test('缺 bid 时用 ask 判下限，两者皆缺则交给定价环节', () => {
+  assert.ok(evaluateBookQuality(snap(null, 0.2), P()), '仅 ask 且在下限下应拦住')
+  assert.equal(evaluateBookQuality(snap(null, 0.95), P()), null, '仅 ask 且够高应放行')
+  assert.equal(evaluateBookQuality(snap(null, null), P()), null, '无盘口不在此环节报错')
+})
+
+test('闸门可按规则关掉（下限/价差设 0 即不校验）', () => {
+  assert.equal(evaluateBookQuality(snap(0.09, 0.4), P({ minBuyPrice: 0, maxSpread: 0 })), null)
 })

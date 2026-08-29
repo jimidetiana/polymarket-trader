@@ -860,6 +860,10 @@ export interface AutoTradeParams {
   slippageBuffer?: number
   /** 买入价硬上限，超过则放弃下单 */
   maxBuyPrice?: number
+  /** 买入价硬下限（判 bestBid）：低于此价说明该线离结算尚远，不下单。0 = 不校验 */
+  minBuyPrice?: number
+  /** 最大可接受买卖价差，超过判薄盘不下单。0 = 不校验 */
+  maxSpread?: number
   /** 每盘口累计最多下单笔数 */
   maxOrdersPerRule?: number
   /** 全局每日最多下单笔数 */
