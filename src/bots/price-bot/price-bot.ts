@@ -33,8 +33,18 @@ import {
   updateConnectionEventPrice,
   listConnectionEvents,
   getConnectionStats,
+  recordAutoOrder,
+  getAutoOrderCounts,
+  listAutoOrders,
+  getAutoOrderSummary,
 } from './db.js';
-import { DEFAULT_CONFIG } from './types.js';
+import { placeOrder } from '../../soccer/trading.js';
+import {
+  resolveAutoTradeParams,
+  computeBuyLimitPrice,
+  computeOrderSize,
+} from './auto-trade.js';
+import { DEFAULT_CONFIG, DEFAULT_AUTO_TRADE } from './types.js';
 import type {
   PriceBotConfig,
   PriceMonitorRule,
@@ -45,6 +55,8 @@ import type {
   PriceRuleType,
   PriceDirection,
   GoalSurgeParams,
+  AutoTradeParams,
+  AutoOrderStatus,
 } from './types.js';
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
@@ -1377,49 +1389,181 @@ async function evaluateGoalSurgeForId(
 }
 
 /**
- * 预留下单接口（占位 / dry-run）。
+ * 下单串行闸。
  *
- * 本期不真正下单（autoTradeEnabled 默认 false），只记录「拟下单」参数。
- * 形状对齐 trading.ts 的 PlaceOrderParams（{market_id, token_id, side, size, price}），
- * 买入限价 = 当时 bestBid，满足「买价 ≥ bestBid」。接入实盘时在此把 params 交给 placeOrder。
+ * 风控是「先查计数、再下单」两步。多条规则同时触发进球信号时，
+ * 它们会读到同一个 dayTotal 各自放行，双双越过每日上限。
+ * 把「查计数 → 下单 → 落库」整段串起来，让后一单一定能看到前一单的记录。
+ *
+ * 只在单进程内有效；多实例部署需要改成库层的原子占用。
+ */
+let orderGate: Promise<void> = Promise.resolve()
+
+function withOrderGate<T>(fn: () => Promise<T>): Promise<T> {
+  const run = orderGate.then(fn, fn)
+  // 无论成败都放行下一个，否则一次失败会永久堵死闸门
+  orderGate = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
+}
+
+/**
+ * 自动下单执行器。
+ *
+ * 双开关：全局 config.autoTradeEnabled 与规则级 rule.autoTradeEnabled 都为 true
+ * 才会真下单，否则记 skipped。所有分支（含被拦下的）都落 price_bot_orders，
+ * 这样「为什么这次信号没下单」有据可查，风控计数也有事实来源。
  */
 async function reserveBuyOrder(
   rule: PriceMonitorRule,
   snapshot: PriceSnapshot,
   reserve: { limitPrice: number; askOk: boolean; profitOk: boolean; note: string },
 ): Promise<void> {
-  const params = {
-    market_id: rule.marketId,
-    token_id: rule.tokenId,
-    side: 'BUY' as const,
-    size: 0, // 占位：实际下单量由实盘接入时的资金 / 风控决定
-    price: reserve.limitPrice,
+  const p = resolveAutoTradeParams(rule, state.config.autoTradeDefaults)
+  const globalOn = state.config.autoTradeEnabled === true
+  const ruleOn = rule.autoTradeEnabled === true
+
+  /** 统一落库 + 写一条可读日志 */
+  const finish = async (
+    status: AutoOrderStatus,
+    price: number,
+    size: number,
+    reason: string,
+    ids?: { tradeOrderId?: number | null; clobOrderId?: string | null },
+  ) => {
+    const notional = Number((price * size).toFixed(4))
+    await recordAutoOrder({
+      botId: state.config.botId,
+      ruleId: rule.id!,
+      tokenId: rule.tokenId,
+      marketId: rule.marketId,
+      eventId: rule.eventId,
+      outcome: rule.outcome,
+      limitPrice: price,
+      size,
+      notional,
+      sizeMode: p.sizeMode,
+      status,
+      reason,
+      bestBid: snapshot.bestBid,
+      bestBidSize: snapshot.bestBidSize,
+      bestAsk: snapshot.bestAsk,
+      bestAskSize: snapshot.bestAskSize,
+      tradeOrderId: ids?.tradeOrderId ?? null,
+      clobOrderId: ids?.clobOrderId ?? null,
+    }).catch((err) => {
+      console.error('[PriceBot] 下单记录落库失败:', err?.message)
+    })
+
+    await recordLog({
+      ruleId: rule.id!,
+      tokenId: rule.tokenId,
+      eventId: rule.eventId,
+      outcome: rule.outcome,
+      action: 'buy_signal',
+      price,
+      bestBid: snapshot.bestBid,
+      bestBidSize: snapshot.bestBidSize,
+      bestAsk: snapshot.bestAsk,
+      bestAskSize: snapshot.bestAskSize,
+      source: snapshot.source,
+      detail:
+        `[自动下单·${status}] BUY ${rule.outcome} 限价=${price.toFixed(4)} ` +
+        `份数=${size} 名义=${notional} ${reason} ${reserve.note}`,
+    }).catch(() => {})
   }
 
-  if (state.config.autoTradeEnabled) {
-    // 预留实盘下单入口（本期不启用）。接入时在此调用 placeOrder(params)。
-    console.warn('[PriceBot] autoTradeEnabled=true，但实盘下单尚未接入，仅记录预留订单')
+  // ---- 开关检查 ----
+  if (!globalOn || !ruleOn) {
+    const off = !globalOn && !ruleOn ? '总开关+盘口开关均关闭'
+      : !globalOn ? '总开关关闭' : '该盘口未开启自动下单'
+    const dry = computeBuyLimitPrice(snapshot, p)
+    await finish('skipped', dry?.price ?? (snapshot.bestBid ?? 0), 0, `DRY-RUN(${off})`)
+    return
   }
 
-  await recordLog({
-    ruleId: rule.id!,
-    tokenId: rule.tokenId,
-    eventId: rule.eventId,
-    outcome: rule.outcome,
-    action: 'buy_signal',
-    price: reserve.limitPrice,
-    bestBid: snapshot.bestBid,
-    bestBidSize: snapshot.bestBidSize,
-    bestAsk: snapshot.bestAsk,
-    bestAskSize: snapshot.bestAskSize,
-    source: snapshot.source,
-    detail:
-      `[预留下单·${state.config.autoTradeEnabled ? '实盘' : 'DRY-RUN'}] BUY ${rule.outcome} ` +
-      `限价=${reserve.limitPrice.toFixed(4)}(≥bestBid) ` +
-      `卖单可成交=${reserve.askOk ? 'Y' : 'N'} 利润空间(ask≤上限)=${reserve.profitOk ? 'Y' : 'N'} ` +
-      `bestAsk=${snapshot.bestAsk?.toFixed(4) ?? '?'}/${snapshot.bestAskSize ?? '?'} ` +
-      `${reserve.note} params=${JSON.stringify(params)}`,
-  }).catch(() => {})
+  // ---- 定价 ----
+  const priced = computeBuyLimitPrice(snapshot, p)
+  if (!priced) {
+    await finish('skipped', 0, 0, '无法定价：bestAsk/bestBid 均缺失')
+    return
+  }
+  if (priced.price >= p.maxBuyPrice) {
+    await finish('skipped', priced.price, 0,
+      `限价${priced.price.toFixed(4)} ≥ 上限${p.maxBuyPrice}，利润空间不足`)
+    return
+  }
+
+  // ---- 规模换算：usdc 口径按限价折成份数 ----
+  const size = computeOrderSize(priced.price, p)
+  if (!(size > 0)) {
+    await finish('skipped', priced.price, 0,
+      `换算后份数为 0（规模=${Math.min(p.baseSize, p.maxSize)} ${p.sizeMode}）`)
+    return
+  }
+
+  // ---- 风控 + 下单：整段串行，避免并发触发时越过每日上限 ----
+  await withOrderGate(async () => {
+    let counts: { ruleTotal: number; dayTotal: number; dayNotional: number }
+    try {
+      counts = await getAutoOrderCounts(rule.id!)
+    } catch (err: any) {
+      // 计数查不到就不下单：宁可漏一单，也不要在额度未知的情况下开枪
+      await finish('skipped', priced.price, size, `风控计数查询失败，保守放弃：${err?.message}`)
+      return
+    }
+
+    if (counts.ruleTotal >= p.maxOrdersPerRule) {
+      await finish('skipped', priced.price, size,
+        `该盘口已下单${counts.ruleTotal}笔，达上限${p.maxOrdersPerRule}`)
+      return
+    }
+    if (counts.dayTotal >= p.maxOrdersPerDay) {
+      await finish('skipped', priced.price, size,
+        `当日已下单${counts.dayTotal}笔，达上限${p.maxOrdersPerDay}`)
+      return
+    }
+    const notional = priced.price * size
+    if (counts.dayNotional + notional > p.maxDailyNotional) {
+      await finish('skipped', priced.price, size,
+        `当日名义额${counts.dayNotional.toFixed(2)}+${notional.toFixed(2)} 超上限${p.maxDailyNotional}`)
+      return
+    }
+
+    try {
+      const result = await placeOrder({
+        market_id: rule.marketId,
+        token_id: rule.tokenId,
+        side: 'BUY',
+        size,
+        price: priced.price,
+        type: 'limit',
+      })
+
+      if (result.success) {
+        await finish(
+          result.simulated ? 'simulated' : 'placed',
+          priced.price,
+          size,
+          `定价=${priced.basis} ${result.message}`,
+          { tradeOrderId: result.orderId ?? null, clobOrderId: result.clobOrderId ?? null },
+        )
+        console.log(
+          `[PriceBot] 自动下单成功 rule=${rule.id} ${rule.outcome} ` +
+          `${size}份 @ ${priced.price.toFixed(4)} (${priced.basis})`,
+        )
+      } else {
+        await finish('failed', priced.price, size,
+          `下单被拒：${result.message}`, { tradeOrderId: result.orderId ?? null })
+        console.warn(`[PriceBot] 自动下单失败 rule=${rule.id}: ${result.message}`)
+      }
+    } catch (err: any) {
+      await finish('failed', priced.price, size, `下单异常：${err?.message ?? String(err)}`)
+      console.error(`[PriceBot] 自动下单异常 rule=${rule.id}:`, err?.message)
+    }
+  })
 }
 
 /** 事后确认结果落库：价格是否持稳在 confirmMin（点1「稳定在 98/99 视为识别成功」） */
@@ -1962,6 +2106,68 @@ export async function deleteRule(id: number): Promise<boolean> {
   return ok
 }
 
+/**
+ * 单独设置某盘口的自动下单开关。
+ *
+ * 走 updateRule 而不是直接改库，是为了同步刷新 ruleCache——
+ * 评估路径同步读缓存，不刷新的话开关改了也不生效。
+ */
+export async function setRuleAutoTrade(
+  ruleId: number,
+  enabled: boolean,
+  params?: AutoTradeParams,
+): Promise<boolean> {
+  const updates: Partial<PriceMonitorRule> = { autoTradeEnabled: enabled }
+  if (params !== undefined) updates.autoTradeParams = params
+  return await updateRule(ruleId, updates)
+}
+
+/**
+ * 批量设置盘口自动下单开关。
+ *
+ * 不传 ruleIds 时作用于所有已启用规则，用于前端「全部开启/全部关闭」。
+ */
+export async function setAutoTradeBatch(
+  enabled: boolean,
+  ruleIds?: number[],
+): Promise<{ updated: number[]; failed: Array<{ ruleId: number; error: string }> }> {
+  let ids = ruleIds
+  if (!ids) {
+    const { rules } = await listRules({ enabledOnly: true })
+    ids = rules.map((r) => r.id).filter((id): id is number => id !== undefined)
+  }
+  const updated: number[] = []
+  const failed: Array<{ ruleId: number; error: string }> = []
+  for (const id of new Set(ids)) {
+    try {
+      await setRuleAutoTrade(id, enabled)
+      updated.push(id)
+    } catch (err: any) {
+      failed.push({ ruleId: id, error: err?.message ?? String(err) })
+    }
+  }
+  return { updated, failed }
+}
+
+/** 自动下单总览：开关状态 + 有效参数 + 当日已用额度 */
+export async function getAutoTradeStatus() {
+  const summary = await getAutoOrderSummary()
+  const { rules } = await listRules({})
+  const effective = { ...DEFAULT_AUTO_TRADE, ...(state.config.autoTradeDefaults ?? {}) }
+  return {
+    globalEnabled: state.config.autoTradeEnabled === true,
+    defaults: effective,
+    /** 已开启自动下单的盘口数 */
+    enabledRules: rules.filter((r) => r.autoTradeEnabled).length,
+    totalRules: rules.length,
+    remainingToday: {
+      orders: Math.max(0, effective.maxOrdersPerDay - summary.dayTotal),
+      notional: Math.max(0, effective.maxDailyNotional - summary.dayNotional),
+    },
+    ...summary,
+  }
+}
+
 export {
   getRule,
   listRules,
@@ -1969,4 +2175,5 @@ export {
   listLogs,
   listConnectionEvents,
   getConnectionStats,
+  listAutoOrders,
 }

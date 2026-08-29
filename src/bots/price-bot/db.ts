@@ -11,6 +11,8 @@ import type {
   PriceBotLog,
   PriceBotConnectionEvent,
   GoalSurgeParams,
+  AutoTradeParams,
+  AutoOrderRecord,
 } from './types.js'
 
 // ==================== 表结构 ====================
@@ -115,6 +117,37 @@ async function doEnsureTables(): Promise<void> {
   // 已存在的表需要补列（CREATE TABLE IF NOT EXISTS 不会修改现有表结构）
   await ensureLogColumns()
 
+  // 自动下单记录表：每次下单尝试都落一条，含被风控拦下的（status=skipped）。
+  // 既是风控计数的事实来源（跨重启），也是复盘成交率的依据。
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS price_bot_orders (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      bot_id VARCHAR(50) NOT NULL,
+      rule_id BIGINT NOT NULL,
+      token_id VARCHAR(200) NOT NULL,
+      market_id VARCHAR(100) NOT NULL,
+      event_id VARCHAR(100) NOT NULL,
+      outcome VARCHAR(100) NOT NULL,
+      limit_price DECIMAL(8,4) NOT NULL,
+      size DECIMAL(18,4) NOT NULL,
+      notional DECIMAL(18,4) NOT NULL,
+      size_mode VARCHAR(10) NOT NULL DEFAULT 'usdc' COMMENT 'shares/usdc',
+      status VARCHAR(15) NOT NULL COMMENT 'placed/failed/skipped/simulated',
+      reason VARCHAR(255) DEFAULT NULL,
+      best_bid DECIMAL(8,4) DEFAULT NULL,
+      best_bid_size DECIMAL(18,4) DEFAULT NULL,
+      best_ask DECIMAL(8,4) DEFAULT NULL,
+      best_ask_size DECIMAL(18,4) DEFAULT NULL,
+      trade_order_id BIGINT DEFAULT NULL,
+      clob_order_id VARCHAR(120) DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_rule (rule_id),
+      KEY idx_status_time (status, created_at),
+      KEY idx_time (created_at),
+      KEY idx_event (event_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+
   // 连接事件表：记录 WS 断开/重连，用于验证断联与进球的相关性
   await pool.execute(`
     CREATE TABLE IF NOT EXISTS price_bot_connection_events (
@@ -194,10 +227,10 @@ async function ensureLogColumns(): Promise<void> {
 }
 
 /**
- * 为已存在的 price_bot_rules 表补充 goal_surge 参数列。
+ * 为已存在的 price_bot_rules 表补列。
  *
- * goal_surge 的多个阈值没有独立列，统一存进一个 JSON 列；
- * 老版本 MySQL(<5.7) 不支持 JSON，退化为 TEXT。按列名检查，可重复执行。
+ * 多阈值参数不给独立列，统一存 JSON；老版本 MySQL(<5.7) 不支持 JSON
+ * 则退化为 TEXT。逐列检查，可重复执行。
  */
 async function ensureRuleColumns(): Promise<void> {
   const [cols] = await pool.execute<any[]>(
@@ -205,24 +238,33 @@ async function ensureRuleColumns(): Promise<void> {
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'price_bot_rules'`,
   )
   const existing = new Set(cols.map((c) => String(c.COLUMN_NAME)))
-  if (existing.has('goal_surge_params')) return
 
-  try {
-    await pool.execute(
-      `ALTER TABLE price_bot_rules ADD COLUMN goal_surge_params JSON DEFAULT NULL`,
-    )
-    console.log('[PriceBot] price_bot_rules 补充列: goal_surge_params (JSON)')
-  } catch (err: any) {
-    if (/duplicate column/i.test(err.message || '')) return
-    // 老版本 MySQL 不支持 JSON，退化为 TEXT
+  // [列名, 首选 DDL, JSON 不被支持时的兜底 DDL]
+  const additions: Array<[string, string, string | null]> = [
+    ['goal_surge_params', 'JSON DEFAULT NULL', 'TEXT DEFAULT NULL'],
+    // 规则级自动下单开关。默认 0：新建/存量规则都不会因为打开总开关就突然开始下单。
+    ['auto_trade_enabled', 'TINYINT(1) NOT NULL DEFAULT 0', null],
+    ['auto_trade_params', 'JSON DEFAULT NULL', 'TEXT DEFAULT NULL'],
+  ]
+
+  for (const [name, ddl, fallback] of additions) {
+    if (existing.has(name)) continue
     try {
-      await pool.execute(
-        `ALTER TABLE price_bot_rules ADD COLUMN goal_surge_params TEXT DEFAULT NULL`,
-      )
-      console.log('[PriceBot] price_bot_rules 补充列: goal_surge_params (TEXT 兜底)')
-    } catch (err2: any) {
-      if (!/duplicate column/i.test(err2.message || '')) {
-        console.error('[PriceBot] 补充列 goal_surge_params 失败:', err2.message)
+      await pool.execute(`ALTER TABLE price_bot_rules ADD COLUMN ${name} ${ddl}`)
+      console.log(`[PriceBot] price_bot_rules 补充列: ${name}`)
+    } catch (err: any) {
+      if (/duplicate column/i.test(err.message || '')) continue
+      if (!fallback) {
+        console.error(`[PriceBot] 补充列 ${name} 失败:`, err.message)
+        continue
+      }
+      try {
+        await pool.execute(`ALTER TABLE price_bot_rules ADD COLUMN ${name} ${fallback}`)
+        console.log(`[PriceBot] price_bot_rules 补充列: ${name} (兜底类型)`)
+      } catch (err2: any) {
+        if (!/duplicate column/i.test(err2.message || '')) {
+          console.error(`[PriceBot] 补充列 ${name} 失败:`, err2.message)
+        }
       }
     }
   }
@@ -295,8 +337,9 @@ export async function createRule(rule: Omit<PriceMonitorRule, 'id' | 'createdAt'
     `INSERT INTO price_bot_rules
        (token_id, market_id, event_id, outcome, rule_type, direction,
         percent_threshold, target_price, price_low, price_high, goal_surge_params,
+        auto_trade_enabled, auto_trade_params,
         signal_type, cooldown_seconds, enabled)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       rule.tokenId,
       rule.marketId,
@@ -309,6 +352,8 @@ export async function createRule(rule: Omit<PriceMonitorRule, 'id' | 'createdAt'
       rule.priceLow ?? null,
       rule.priceHigh ?? null,
       rule.goalSurgeParams ? JSON.stringify(rule.goalSurgeParams) : null,
+      rule.autoTradeEnabled ? 1 : 0,
+      rule.autoTradeParams ? JSON.stringify(rule.autoTradeParams) : null,
       rule.signalType,
       rule.cooldownSeconds,
       rule.enabled ? 1 : 0,
@@ -331,6 +376,8 @@ export async function updateRule(id: number, updates: Partial<PriceMonitorRule>)
     priceLow: 'price_low',
     priceHigh: 'price_high',
     goalSurgeParams: 'goal_surge_params',
+    autoTradeEnabled: 'auto_trade_enabled',
+    autoTradeParams: 'auto_trade_params',
     signalType: 'signal_type',
     cooldownSeconds: 'cooldown_seconds',
     enabled: 'enabled',
@@ -592,6 +639,151 @@ export async function listLogs(options: {
   return { logs, total }
 }
 
+// ==================== 自动下单记录 CRUD ====================
+
+export async function recordAutoOrder(
+  order: Omit<AutoOrderRecord, 'id' | 'createdAt'>,
+): Promise<number> {
+  await ensureTables()
+  const [result] = await pool.execute<any>(
+    `INSERT INTO price_bot_orders
+       (bot_id, rule_id, token_id, market_id, event_id, outcome,
+        limit_price, size, notional, size_mode, status, reason,
+        best_bid, best_bid_size, best_ask, best_ask_size,
+        trade_order_id, clob_order_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      order.botId,
+      order.ruleId,
+      order.tokenId,
+      order.marketId,
+      order.eventId,
+      order.outcome,
+      order.limitPrice,
+      order.size,
+      order.notional,
+      order.sizeMode,
+      order.status,
+      order.reason ?? null,
+      order.bestBid ?? null,
+      order.bestBidSize ?? null,
+      order.bestAsk ?? null,
+      order.bestAskSize ?? null,
+      order.tradeOrderId ?? null,
+      order.clobOrderId ?? null,
+    ],
+  )
+  return Number(result.insertId)
+}
+
+/**
+ * 风控计数。
+ *
+ * 只统计真正占用额度的状态（placed/simulated），skipped/failed 不计——
+ * 被拦下或提交失败的没有实际敞口，不该消耗配额。
+ *
+ * 计数走库而不是内存，这样重启不会把已用额度清零。
+ * 「当日」按 UTC 自然日，与库里 DATETIME 的存储口径一致。
+ */
+export async function getAutoOrderCounts(ruleId: number): Promise<{
+  ruleTotal: number
+  dayTotal: number
+  dayNotional: number
+}> {
+  await ensureTables()
+  const [rows] = await pool.execute<any[]>(
+    `SELECT
+       (SELECT COUNT(*) FROM price_bot_orders
+         WHERE rule_id = ? AND status IN ('placed','simulated')) AS rule_total,
+       (SELECT COUNT(*) FROM price_bot_orders
+         WHERE status IN ('placed','simulated') AND created_at >= UTC_DATE()) AS day_total,
+       (SELECT COALESCE(SUM(notional), 0) FROM price_bot_orders
+         WHERE status IN ('placed','simulated') AND created_at >= UTC_DATE()) AS day_notional`,
+    [ruleId],
+  )
+  const r = rows[0] || {}
+  return {
+    ruleTotal: Number(r.rule_total || 0),
+    dayTotal: Number(r.day_total || 0),
+    dayNotional: Number(r.day_notional || 0),
+  }
+}
+
+export async function listAutoOrders(options: {
+  ruleId?: number
+  status?: string
+  limit?: number
+  offset?: number
+} = {}): Promise<{ orders: AutoOrderRecord[]; total: number }> {
+  await ensureTables()
+
+  const where: string[] = []
+  const params: any[] = []
+  if (options.ruleId !== undefined) {
+    where.push('o.rule_id = ?')
+    params.push(options.ruleId)
+  }
+  if (options.status) {
+    where.push('o.status = ?')
+    params.push(options.status)
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+  const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 500)
+  const offset = Math.max(Number(options.offset) || 0, 0)
+
+  const [countRows] = await pool.execute<any[]>(
+    `SELECT COUNT(*) AS total FROM price_bot_orders o ${whereSql}`,
+    params,
+  )
+  const total = Number(countRows[0]?.total || 0)
+
+  const [rows] = await pool.execute<any[]>(
+    `SELECT o.*,
+            e.home_team_zh, e.away_team_zh, e.home_team_en, e.away_team_en,
+            e.league, e.end_time,
+            m.question_zh, m.question_en, m.market_type, m.line
+       FROM price_bot_orders o
+       LEFT JOIN soccer_events e ON e.id = o.event_id
+       LEFT JOIN soccer_markets m ON m.id = o.market_id
+     ${whereSql}
+     ORDER BY o.created_at DESC, o.id DESC
+     LIMIT ${limit} OFFSET ${offset}`,
+    params,
+  )
+
+  return { orders: rows.map(rowToAutoOrder), total }
+}
+
+/** 当日下单概览，给前端顶部展示已用额度 */
+export async function getAutoOrderSummary(): Promise<{
+  dayTotal: number
+  dayNotional: number
+  placed: number
+  failed: number
+  skipped: number
+}> {
+  await ensureTables()
+  const [rows] = await pool.execute<any[]>(
+    `SELECT
+       SUM(status IN ('placed','simulated') AND created_at >= UTC_DATE()) AS day_total,
+       COALESCE(SUM(CASE WHEN status IN ('placed','simulated')
+                          AND created_at >= UTC_DATE() THEN notional ELSE 0 END), 0) AS day_notional,
+       SUM(status IN ('placed','simulated')) AS placed,
+       SUM(status = 'failed') AS failed,
+       SUM(status = 'skipped') AS skipped
+     FROM price_bot_orders`,
+  )
+  const r = rows[0] || {}
+  return {
+    dayTotal: Number(r.day_total || 0),
+    dayNotional: Number(r.day_notional || 0),
+    placed: Number(r.placed || 0),
+    failed: Number(r.failed || 0),
+    skipped: Number(r.skipped || 0),
+  }
+}
+
 // ==================== 连接事件 CRUD ====================
 
 export async function recordConnectionEvent(
@@ -763,18 +955,44 @@ function toIsoUtc(raw: any): string | undefined {
 }
 
 /**
- * 解析 goal_surge_params 列。
+ * 解析 JSON 参数列（goal_surge_params / auto_trade_params）。
  *
  * JSON 列会被 mysql2 直接解析成对象；TEXT 兜底列则是字符串，需再 parse。
  */
-function parseGoalSurgeParams(raw: any): GoalSurgeParams | undefined {
+function parseJsonParams<T>(raw: any): T | undefined {
   if (raw == null) return undefined
-  if (typeof raw === 'object') return raw as GoalSurgeParams
+  if (typeof raw === 'object') return raw as T
   try {
     const parsed = JSON.parse(String(raw))
-    return parsed && typeof parsed === 'object' ? (parsed as GoalSurgeParams) : undefined
+    return parsed && typeof parsed === 'object' ? (parsed as T) : undefined
   } catch {
     return undefined
+  }
+}
+
+function rowToAutoOrder(row: any): AutoOrderRecord {
+  return {
+    id: Number(row.id),
+    botId: String(row.bot_id),
+    ruleId: Number(row.rule_id),
+    tokenId: String(row.token_id),
+    marketId: String(row.market_id),
+    eventId: String(row.event_id),
+    outcome: String(row.outcome),
+    limitPrice: Number(row.limit_price),
+    size: Number(row.size),
+    notional: Number(row.notional),
+    sizeMode: row.size_mode as any,
+    status: row.status as any,
+    reason: row.reason ?? undefined,
+    bestBid: row.best_bid != null ? Number(row.best_bid) : null,
+    bestBidSize: row.best_bid_size != null ? Number(row.best_bid_size) : null,
+    bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+    bestAskSize: row.best_ask_size != null ? Number(row.best_ask_size) : null,
+    tradeOrderId: row.trade_order_id != null ? Number(row.trade_order_id) : null,
+    clobOrderId: row.clob_order_id ?? null,
+    createdAt: toIsoUtc(row.created_at),
+    ...extractContext(row),
   }
 }
 
@@ -791,7 +1009,9 @@ function rowToRule(row: any): PriceMonitorRule {
     targetPrice: row.target_price != null ? Number(row.target_price) : undefined,
     priceLow: row.price_low != null ? Number(row.price_low) : undefined,
     priceHigh: row.price_high != null ? Number(row.price_high) : undefined,
-    goalSurgeParams: parseGoalSurgeParams(row.goal_surge_params),
+    goalSurgeParams: parseJsonParams<GoalSurgeParams>(row.goal_surge_params),
+    autoTradeEnabled: row.auto_trade_enabled === 1 || row.auto_trade_enabled === true,
+    autoTradeParams: parseJsonParams<AutoTradeParams>(row.auto_trade_params),
     signalType: row.signal_type as any,
     cooldownSeconds: Number(row.cooldown_seconds),
     enabled: row.enabled === 1 || row.enabled === true,

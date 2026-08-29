@@ -846,6 +846,76 @@ export interface GoalSurgeParams {
   confirmHoldMs?: number
 }
 
+export type OrderSizeMode = 'shares' | 'usdc'
+
+/** 自动下单参数。全局默认 + 每盘口可覆盖 */
+export interface AutoTradeParams {
+  /** 下单规模口径：按份数 或 按金额 */
+  sizeMode?: OrderSizeMode
+  /** 标准下单规模：sizeMode=shares 为份数，=usdc 为金额 */
+  baseSize?: number
+  /** 单笔最大下单规模（与 baseSize 同口径） */
+  maxSize?: number
+  /** 穿价缓冲：在 bestAsk 之上再让的价格，换成交确定性 */
+  slippageBuffer?: number
+  /** 买入价硬上限，超过则放弃下单 */
+  maxBuyPrice?: number
+  /** 每盘口累计最多下单笔数 */
+  maxOrdersPerRule?: number
+  /** 全局每日最多下单笔数 */
+  maxOrdersPerDay?: number
+  /** 全局每日累计名义额上限（USDC） */
+  maxDailyNotional?: number
+  /** 价格 tick */
+  tickSize?: number
+}
+
+export type AutoOrderStatus = 'placed' | 'failed' | 'skipped' | 'simulated'
+
+export interface AutoOrderRecord {
+  id?: number
+  botId: string
+  ruleId: number
+  tokenId: string
+  marketId: string
+  eventId: string
+  outcome: string
+  limitPrice: number
+  size: number
+  notional: number
+  sizeMode: OrderSizeMode
+  status: AutoOrderStatus
+  /** skipped/failed 的原因 */
+  reason?: string
+  bestBid?: number | null
+  bestBidSize?: number | null
+  bestAsk?: number | null
+  bestAskSize?: number | null
+  tradeOrderId?: number | null
+  clobOrderId?: string | null
+  createdAt?: string
+  matchName?: string
+  marketName?: string
+  league?: string
+}
+
+export interface AutoTradeStatus {
+  /** 总开关 */
+  globalEnabled: boolean
+  /** 生效中的全局默认参数 */
+  defaults: Required<AutoTradeParams>
+  /** 已开启自动下单的盘口数 */
+  enabledRules: number
+  totalRules: number
+  /** 当日剩余额度 */
+  remainingToday: { orders: number; notional: number }
+  dayTotal: number
+  dayNotional: number
+  placed: number
+  failed: number
+  skipped: number
+}
+
 export interface PriceMonitorRule {
   id?: number
   tokenId: string
@@ -860,6 +930,10 @@ export interface PriceMonitorRule {
   priceHigh?: number
   /** ruleType=goal_surge 时使用，留空回退后端默认 */
   goalSurgeParams?: GoalSurgeParams
+  /** 该盘口是否允许自动下单（与全局总开关取「与」） */
+  autoTradeEnabled?: boolean
+  /** 该盘口的自动下单参数覆盖，留空回退全局默认 */
+  autoTradeParams?: AutoTradeParams
   signalType: 'buy_signal' | 'sell_signal' | 'alert'
   cooldownSeconds: number
   enabled: boolean
@@ -1059,6 +1133,63 @@ export async function startPriceBotMonitorsBatch(ruleIds?: number[]): Promise<Ba
     method: 'POST',
     body: JSON.stringify(ruleIds ? { ruleIds } : {}),
   })
+}
+
+// ==================== 自动下单 ====================
+
+export async function fetchAutoTradeStatus(): Promise<AutoTradeStatus> {
+  return await request<AutoTradeStatus>('/api/bots/price-bot/auto-trade')
+}
+
+/** 设置总开关 / 全局默认参数 */
+export async function updateAutoTrade(payload: {
+  enabled?: boolean
+  defaults?: AutoTradeParams
+}): Promise<AutoTradeStatus> {
+  return await request<AutoTradeStatus>('/api/bots/price-bot/auto-trade', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/** 单个盘口的自动下单开关 */
+export async function setRuleAutoTrade(
+  ruleId: number,
+  enabled: boolean,
+  params?: AutoTradeParams,
+): Promise<{ rule: PriceMonitorRule }> {
+  return await request<{ rule: PriceMonitorRule }>(`/api/bots/price-bot/auto-trade/${ruleId}`, {
+    method: 'POST',
+    body: JSON.stringify(params ? { enabled, params } : { enabled }),
+  })
+}
+
+/** 批量开关盘口自动下单。不传 ruleIds 则作用于所有已启用规则 */
+export async function setAutoTradeBatch(
+  enabled: boolean,
+  ruleIds?: number[],
+): Promise<AutoTradeStatus & { updated: number[] }> {
+  return await request<AutoTradeStatus & { updated: number[] }>(
+    '/api/bots/price-bot/auto-trade/batch',
+    { method: 'POST', body: JSON.stringify(ruleIds ? { enabled, ruleIds } : { enabled }) },
+  )
+}
+
+export async function fetchAutoOrders(params?: {
+  ruleId?: number
+  status?: string
+  limit?: number
+  offset?: number
+}): Promise<{ orders: AutoOrderRecord[]; total: number }> {
+  const q = new URLSearchParams()
+  if (params?.ruleId !== undefined) q.set('ruleId', String(params.ruleId))
+  if (params?.status) q.set('status', params.status)
+  if (params?.limit !== undefined) q.set('limit', String(params.limit))
+  if (params?.offset !== undefined) q.set('offset', String(params.offset))
+  const qs = q.toString()
+  return await request<{ orders: AutoOrderRecord[]; total: number }>(
+    `/api/bots/price-bot/orders${qs ? `?${qs}` : ''}`,
+  )
 }
 
 export async function stopPriceBotMonitor(ruleId: number): Promise<PriceMonitorState> {

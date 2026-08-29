@@ -68,6 +68,10 @@ import {
   listLogs,
   listConnectionEvents,
   getConnectionStats,
+  listAutoOrders,
+  getAutoTradeStatus,
+  setRuleAutoTrade,
+  setAutoTradeBatch,
   getConnectionState,
 } from '../bots/price-bot/price-bot.js';
 import { config } from '../config.js';
@@ -1320,6 +1324,69 @@ app.post('/api/bots/price-bot/config', asyncHandler(async (req, res) => {
 app.post('/api/bots/price-bot/trigger', asyncHandler(async (_req, res) => {
   await triggerPriceBotCycle();
   res.json({ success: true, ...getPriceBotStatus() });
+}));
+
+// ==================== 自动下单 ====================
+
+app.get('/api/bots/price-bot/auto-trade', asyncHandler(async (_req, res) => {
+  res.json({ success: true, ...(await getAutoTradeStatus()) });
+}));
+
+/**
+ * 自动下单总开关 + 全局默认参数。
+ *
+ * 开关落在内存配置里（updateConfig），进程重启回到关闭状态——
+ * 动钱的开关不该在无人值守时自己恢复。
+ */
+app.post('/api/bots/price-bot/auto-trade', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const patch: Record<string, unknown> = {};
+  if (body.enabled !== undefined) patch.autoTradeEnabled = body.enabled === true;
+  if (body.defaults && typeof body.defaults === 'object') {
+    const cur = getPriceBotStatus().config.autoTradeDefaults || {};
+    patch.autoTradeDefaults = { ...cur, ...body.defaults };
+  }
+  updatePriceBotConfig(patch as any);
+  res.json({ success: true, ...(await getAutoTradeStatus()) });
+}));
+
+/** 批量开关盘口级自动下单。不传 ruleIds 则作用于所有已启用规则 */
+app.post('/api/bots/price-bot/auto-trade/batch', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const enabled = body.enabled === true;
+  const ruleIds = Array.isArray(body.ruleIds)
+    ? body.ruleIds.map(Number).filter((n: number) => Number.isFinite(n))
+    : undefined;
+  const result = await setAutoTradeBatch(enabled, ruleIds);
+  res.json({ success: true, ...result, ...(await getAutoTradeStatus()) });
+}));
+
+/** 单个盘口的自动下单开关与参数覆盖 */
+app.post('/api/bots/price-bot/auto-trade/:ruleId', asyncHandler(async (req, res) => {
+  const ruleId = Number(req.params.ruleId);
+  if (!Number.isFinite(ruleId)) {
+    res.status(400).json({ success: false, message: '无效的 ruleId' });
+    return;
+  }
+  const body = req.body || {};
+  const ok = await setRuleAutoTrade(
+    ruleId,
+    body.enabled === true,
+    body.params && typeof body.params === 'object' ? body.params : undefined,
+  );
+  res.json({ success: ok, rule: await getRule(ruleId) });
+}));
+
+/** 下单记录（含被风控拦下的 skipped，用于回答「为什么没下单」） */
+app.get('/api/bots/price-bot/orders', asyncHandler(async (req, res) => {
+  const { ruleId, status, limit, offset } = req.query;
+  const result = await listAutoOrders({
+    ruleId: ruleId !== undefined ? Number(ruleId) : undefined,
+    status: status !== undefined ? String(status) : undefined,
+    limit: limit !== undefined ? Number(limit) : undefined,
+    offset: offset !== undefined ? Number(offset) : undefined,
+  });
+  res.json({ success: true, ...result });
 }));
 
 // 监控规则 CRUD

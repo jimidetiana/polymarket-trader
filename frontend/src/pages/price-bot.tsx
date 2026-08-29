@@ -3,6 +3,7 @@ import {
   Play, Pause, Zap, Settings, Activity, RefreshCw, Plus, Trash2,
   TrendingUp, TrendingDown, Bell, Radio, FileText,
   ChevronDown, ChevronUp, ChevronRight, LineChart,
+  ShoppingCart, ShieldAlert,
 } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { cn } from '@/lib/utils'
@@ -26,12 +27,20 @@ import {
   triggerPriceBotMonitor,
   fetchPriceBotTriggers,
   fetchPriceBotLogs,
+  fetchAutoTradeStatus,
+  updateAutoTrade,
+  setRuleAutoTrade,
+  setAutoTradeBatch,
+  fetchAutoOrders,
   type PriceBotStatus,
   type PriceMonitorRule,
   type PriceMonitorState,
   type PriceTriggerRecord,
   type PriceBotLog,
   type GoalSurgeParams,
+  type AutoTradeStatus,
+  type AutoTradeParams,
+  type AutoOrderRecord,
 } from '@/lib/api'
 
 /**
@@ -165,6 +174,13 @@ export default function PriceBotPage() {
   const [botLogs, setBotLogs] = useState<PriceBotLog[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
 
+  // 自动下单
+  const [autoTrade, setAutoTrade] = useState<AutoTradeStatus | null>(null)
+  const [showAutoTrade, setShowAutoTrade] = useState(false)
+  const [autoOrders, setAutoOrders] = useState<AutoOrderRecord[]>([])
+  const [autoTradeBusy, setAutoTradeBusy] = useState(false)
+  const [draftAutoParams, setDraftAutoParams] = useState<AutoTradeParams>({})
+
   const loadStatus = useCallback(async () => {
     try {
       setStatus(await fetchPriceBotStatus())
@@ -185,6 +201,26 @@ export default function PriceBotPage() {
   const loadMonitors = useCallback(async () => {
     try {
       setMonitors(await fetchPriceBotMonitors())
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const loadAutoTrade = useCallback(async () => {
+    try {
+      const st = await fetchAutoTradeStatus()
+      setAutoTrade(st)
+      // 只在草稿为空时用服务端值填充，避免覆盖用户正在编辑的输入
+      setDraftAutoParams((cur) => (Object.keys(cur).length ? cur : st.defaults))
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const loadAutoOrders = useCallback(async () => {
+    try {
+      const { orders } = await fetchAutoOrders({ limit: 50 })
+      setAutoOrders(orders)
     } catch {
       // ignore
     }
@@ -211,12 +247,19 @@ export default function PriceBotPage() {
     loadStatus()
     loadRules()
     loadMonitors()
+    loadAutoTrade()
     const interval = setInterval(() => {
       loadStatus()
       loadMonitors()
+      loadAutoTrade()
     }, 5000)
     return () => clearInterval(interval)
-  }, [loadStatus, loadRules, loadMonitors])
+  }, [loadStatus, loadRules, loadMonitors, loadAutoTrade])
+
+  // 展开自动下单面板时拉取下单记录
+  useEffect(() => {
+    if (showAutoTrade) loadAutoOrders()
+  }, [showAutoTrade, loadAutoOrders])
 
   // 切换选中机器人时，拉取该机器人的触发记录与日志
   useEffect(() => {
@@ -363,6 +406,80 @@ export default function PriceBotPage() {
     }
   }
 
+  /**
+   * 切换自动下单总开关。
+   *
+   * 打开时二次确认——这是唯一一个会让程序自己花钱的开关，
+   * 误点的代价是真实成交，值得多一次拦截。
+   */
+  async function handleToggleGlobalAutoTrade() {
+    if (autoTradeBusy) return
+    const turningOn = !(autoTrade?.globalEnabled ?? false)
+    if (turningOn) {
+      const n = autoTrade?.enabledRules ?? 0
+      const d = autoTrade?.defaults
+      const ok = confirm(
+        `即将开启自动下单总开关。\n\n` +
+        `已授权盘口：${n} 个${n === 0 ? '（当前没有盘口开启，不会有任何下单）' : ''}\n` +
+        `标准规模：${d?.baseSize ?? '?'} ${d?.sizeMode === 'usdc' ? 'USDC' : '份'}\n` +
+        `单笔上限：${d?.maxSize ?? '?'} / 每盘口 ${d?.maxOrdersPerRule ?? '?'} 笔 / 每日 ${d?.maxOrdersPerDay ?? '?'} 笔\n` +
+        `每日名义额上限：${d?.maxDailyNotional ?? '?'} USDC\n\n` +
+        `确认开启？`,
+      )
+      if (!ok) return
+    }
+    setAutoTradeBusy(true)
+    try {
+      setAutoTrade(await updateAutoTrade({ enabled: turningOn }))
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAutoTradeBusy(false)
+    }
+  }
+
+  async function handleSaveAutoDefaults() {
+    if (autoTradeBusy) return
+    setAutoTradeBusy(true)
+    try {
+      setAutoTrade(await updateAutoTrade({ defaults: draftAutoParams }))
+      alert('全局下单参数已保存')
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAutoTradeBusy(false)
+    }
+  }
+
+  /** 切换单个盘口的自动下单授权 */
+  async function handleToggleRuleAutoTrade(rule: PriceMonitorRule) {
+    if (rule.id == null) return
+    const next = !rule.autoTradeEnabled
+    try {
+      await setRuleAutoTrade(rule.id, next)
+      await Promise.all([loadRules(), loadAutoTrade()])
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /** 批量授权/取消授权所有已启用盘口 */
+  async function handleBatchAutoTrade(enabled: boolean) {
+    if (autoTradeBusy) return
+    if (enabled && !confirm('将为所有已启用规则开启自动下单授权，确认？')) return
+    setAutoTradeBusy(true)
+    try {
+      const st = await setAutoTradeBatch(enabled)
+      setAutoTrade(st)
+      await loadRules()
+      alert(`已${enabled ? '开启' : '关闭'} ${st.updated.length} 个盘口的自动下单`)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAutoTradeBusy(false)
+    }
+  }
+
   async function handleMonitorAction(ruleId: number, action: 'start' | 'stop' | 'trigger') {
     try {
       if (action === 'start') await startPriceBotMonitor(ruleId)
@@ -418,6 +535,36 @@ export default function PriceBotPage() {
               启动引擎
             </button>
           )}
+          {/* 自动下单总开关：状态直接写在按钮上，避免要展开面板才知道是否在下单 */}
+          <button
+            onClick={handleToggleGlobalAutoTrade}
+            disabled={autoTradeBusy}
+            className={cn(
+              'flex items-center gap-1 rounded-md px-2.5 py-1.5 text-sm disabled:opacity-50',
+              autoTrade?.globalEnabled
+                ? 'bg-amber-500/15 text-amber-600 hover:bg-amber-500/25'
+                : 'border hover:bg-muted',
+            )}
+            title={
+              autoTrade?.globalEnabled
+                ? '自动下单已开启，点击关闭'
+                : '自动下单已关闭，点击开启（会真实下单）'
+            }
+          >
+            <ShoppingCart className="h-4 w-4" />
+            自动下单{autoTrade?.globalEnabled ? '已开' : '已关'}
+          </button>
+          <button
+            onClick={() => setShowAutoTrade((s) => !s)}
+            className={cn(
+              'flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-sm hover:bg-muted',
+              showAutoTrade && 'bg-muted',
+            )}
+            title="下单参数与记录"
+          >
+            <ShieldAlert className="h-4 w-4" />
+            下单风控
+          </button>
           <button
             onClick={() => setShowSettings((s) => !s)}
             className={cn(
@@ -434,6 +581,21 @@ export default function PriceBotPage() {
       {showSettings && status && (
         <div className="mb-4">
           <SettingsPanel config={status.config} onSave={handleConfigUpdate} />
+        </div>
+      )}
+
+      {showAutoTrade && (
+        <div className="mb-4">
+          <AutoTradePanel
+            status={autoTrade}
+            draft={draftAutoParams}
+            orders={autoOrders}
+            busy={autoTradeBusy}
+            onDraftChange={setDraftAutoParams}
+            onSave={handleSaveAutoDefaults}
+            onBatch={handleBatchAutoTrade}
+            onRefreshOrders={loadAutoOrders}
+          />
         </div>
       )}
 
@@ -572,8 +734,10 @@ export default function PriceBotPage() {
               detailLoading={detailLoading}
               onMonitorAction={handleMonitorAction}
               onToggleRule={handleToggleRule}
+              onToggleAutoTrade={handleToggleRuleAutoTrade}
               onDeleteRule={handleDeleteRule}
               onRefreshDetail={() => selectedRule.id != null && loadBotData(selectedRule.id)}
+              globalAutoTrade={autoTrade?.globalEnabled ?? false}
             />
           )}
         </main>
@@ -641,6 +805,15 @@ function BotCard({
         {suffix && (
           <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{suffix}</span>
         )}
+        {rule.autoTradeEnabled && (
+          <span
+            className="inline-flex items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-600"
+            title="该盘口已授权自动下单"
+          >
+            <ShoppingCart className="h-3 w-3" />
+            自动
+          </span>
+        )}
         <span className="text-xs text-muted-foreground">{rule.outcome}</span>
       </div>
       <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
@@ -663,8 +836,10 @@ function BotDetail({
   detailLoading,
   onMonitorAction,
   onToggleRule,
+  onToggleAutoTrade,
   onDeleteRule,
   onRefreshDetail,
+  globalAutoTrade,
 }: {
   rule: PriceMonitorRule
   monitor: PriceMonitorState | null
@@ -673,8 +848,11 @@ function BotDetail({
   detailLoading: boolean
   onMonitorAction: (ruleId: number, action: 'start' | 'stop' | 'trigger') => void
   onToggleRule: (rule: PriceMonitorRule) => void
+  onToggleAutoTrade: (rule: PriceMonitorRule) => void
   onDeleteRule: (id: number) => void
   onRefreshDetail: () => void
+  /** 全局总开关状态，用于提示「盘口已开但总开关关着」 */
+  globalAutoTrade: boolean
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const toggle = (key: string) =>
@@ -715,6 +893,12 @@ function BotDetail({
               ) : (
                 <span className="text-xs text-muted-foreground">已禁用</span>
               )}
+              {/* 盘口开了但总开关没开时明确说明不会下单，避免误以为已生效 */}
+              {rule.autoTradeEnabled && !globalAutoTrade && (
+                <span className="text-xs text-amber-600" title="总开关关闭中，本盘口不会下单">
+                  自动下单待总开关
+                </span>
+              )}
             </div>
             <p className="mt-1 truncate text-sm text-muted-foreground">
               {[suffix, rule.outcome, RULE_TYPE_LABELS[rule.ruleType], DIRECTION_LABELS[rule.direction], rule.league]
@@ -743,6 +927,23 @@ function BotDetail({
                 启动
               </button>
             )}
+            <button
+              onClick={() => onToggleAutoTrade(rule)}
+              className={cn(
+                'flex items-center gap-1 rounded-md border px-2 py-1 text-sm',
+                rule.autoTradeEnabled
+                  ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20'
+                  : 'hover:bg-muted',
+              )}
+              title={
+                rule.autoTradeEnabled
+                  ? '该盘口已授权自动下单，点击取消授权'
+                  : '授权该盘口自动下单（还需总开关开启才会真下单）'
+              }
+            >
+              <ShoppingCart className="h-3.5 w-3.5" />
+              {rule.autoTradeEnabled ? '已授权下单' : '授权下单'}
+            </button>
             <button
               onClick={() => rule.id != null && onMonitorAction(rule.id, 'trigger')}
               className="flex items-center gap-1 rounded-md border px-2 py-1 text-sm hover:bg-muted"
@@ -1090,6 +1291,209 @@ function SettingsPanel({
         </button>
       </div>
     </div>
+  )
+}
+
+// ==================== 自动下单面板 ====================
+
+const AUTO_ORDER_STATUS_LABELS: Record<string, { label: string; className: string }> = {
+  placed: { label: '已下单', className: 'text-green-600' },
+  simulated: { label: '模拟单', className: 'text-blue-600' },
+  failed: { label: '失败', className: 'text-red-600' },
+  skipped: { label: '已跳过', className: 'text-muted-foreground' },
+}
+
+function AutoTradePanel({
+  status,
+  draft,
+  orders,
+  busy,
+  onDraftChange,
+  onSave,
+  onBatch,
+  onRefreshOrders,
+}: {
+  status: AutoTradeStatus | null
+  draft: AutoTradeParams
+  orders: AutoOrderRecord[]
+  busy: boolean
+  onDraftChange: (p: AutoTradeParams) => void
+  onSave: () => void
+  onBatch: (enabled: boolean) => void
+  onRefreshOrders: () => void
+}) {
+  const set = (k: keyof AutoTradeParams, v: string) => {
+    if (k === 'sizeMode') {
+      onDraftChange({ ...draft, sizeMode: v as 'shares' | 'usdc' })
+      return
+    }
+    // 空串保留为 undefined，让后端回退默认值，而不是被写成 0
+    onDraftChange({ ...draft, [k]: v === '' ? undefined : Number(v) })
+  }
+
+  const unit = draft.sizeMode === 'shares' ? '份' : 'USDC'
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
+      {/* 额度概览 */}
+      <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatCard
+          label="总开关"
+          value={status?.globalEnabled ? '已开启' : '已关闭'}
+          className={status?.globalEnabled ? 'text-amber-600' : 'text-muted-foreground'}
+        />
+        <StatCard label="已授权盘口" value={`${status?.enabledRules ?? 0} / ${status?.totalRules ?? 0}`} />
+        <StatCard
+          label="今日剩余笔数"
+          value={`${status?.remainingToday.orders ?? 0} 笔`}
+          className={(status?.remainingToday.orders ?? 0) === 0 ? 'text-red-600' : undefined}
+        />
+        <StatCard
+          label="今日剩余额度"
+          value={`${(status?.remainingToday.notional ?? 0).toFixed(2)} USDC`}
+          className={(status?.remainingToday.notional ?? 0) <= 0 ? 'text-red-600' : undefined}
+        />
+      </div>
+
+      <p className="mb-2 text-xs text-muted-foreground">
+        下单价以 <span className="font-mono">bestAsk + 穿价缓冲</span> 报价（吃单，优先保成交），
+        而非挂在 bestBid 上等成交。缓冲同时覆盖下单延迟内对手价的上移。
+      </p>
+
+      {/* 参数 */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">规模口径</span>
+          <select
+            value={draft.sizeMode ?? 'usdc'}
+            onChange={(e) => set('sizeMode', e.target.value)}
+            className="rounded-md border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="usdc">按金额（USDC）</option>
+            <option value="shares">按份数</option>
+          </select>
+        </label>
+        <NumField label={`标准下单规模（${unit}）`} value={draft.baseSize} onChange={(v) => set('baseSize', v)} step={1} />
+        <NumField label={`单笔最大规模（${unit}）`} value={draft.maxSize} onChange={(v) => set('maxSize', v)} step={1} />
+        <NumField label="穿价缓冲" value={draft.slippageBuffer} onChange={(v) => set('slippageBuffer', v)} step={0.01} />
+        <NumField label="买入价上限" value={draft.maxBuyPrice} onChange={(v) => set('maxBuyPrice', v)} step={0.01} />
+        <NumField label="每盘口最多笔数" value={draft.maxOrdersPerRule} onChange={(v) => set('maxOrdersPerRule', v)} step={1} />
+        <NumField label="每日最多笔数" value={draft.maxOrdersPerDay} onChange={(v) => set('maxOrdersPerDay', v)} step={1} />
+        <NumField label="每日金额上限（USDC）" value={draft.maxDailyNotional} onChange={(v) => set('maxDailyNotional', v)} step={10} />
+        <NumField label="价格 tick" value={draft.tickSize} onChange={(v) => set('tickSize', v)} step={0.001} />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          onClick={onSave}
+          disabled={busy}
+          className="rounded-md bg-primary px-4 py-1.5 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          保存全局参数
+        </button>
+        <button
+          onClick={() => onBatch(true)}
+          disabled={busy}
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-500/20 disabled:opacity-50"
+        >
+          全部盘口授权
+        </button>
+        <button
+          onClick={() => onBatch(false)}
+          disabled={busy}
+          className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        >
+          全部取消授权
+        </button>
+        <button
+          onClick={onRefreshOrders}
+          className="ml-auto flex items-center gap-1 rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          刷新记录
+        </button>
+      </div>
+
+      {/* 下单记录 */}
+      <div className="mt-3 border-t border-border pt-3">
+        <p className="mb-2 text-xs font-medium text-muted-foreground">
+          下单记录（含被风控拦下的，共 {orders.length} 条）
+        </p>
+        {orders.length === 0 ? (
+          <p className="py-2 text-xs text-muted-foreground">暂无下单记录</p>
+        ) : (
+          <div className="max-h-64 overflow-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-muted/80 text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1 text-left font-medium">时间</th>
+                  <th className="px-2 py-1 text-left font-medium">盘口</th>
+                  <th className="px-2 py-1 text-right font-medium">限价</th>
+                  <th className="px-2 py-1 text-right font-medium">份数</th>
+                  <th className="px-2 py-1 text-right font-medium">金额</th>
+                  <th className="px-2 py-1 text-left font-medium">状态</th>
+                  <th className="px-2 py-1 text-left font-medium">说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orders.map((o) => {
+                  const st = AUTO_ORDER_STATUS_LABELS[o.status] ?? {
+                    label: o.status,
+                    className: '',
+                  }
+                  return (
+                    <tr key={o.id} className="border-t border-border/50">
+                      <td className="whitespace-nowrap px-2 py-1 text-muted-foreground">
+                        {formatBeijingTime(o.createdAt)}
+                      </td>
+                      <td className="max-w-[180px] truncate px-2 py-1" title={o.matchName ?? o.tokenId}>
+                        {o.matchName ?? `#${o.ruleId}`} · {o.outcome}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">{o.limitPrice.toFixed(4)}</td>
+                      <td className="px-2 py-1 text-right font-mono">{o.size}</td>
+                      <td className="px-2 py-1 text-right font-mono">{o.notional.toFixed(2)}</td>
+                      <td className={cn('whitespace-nowrap px-2 py-1 font-medium', st.className)}>
+                        {st.label}
+                      </td>
+                      <td className="max-w-[280px] truncate px-2 py-1 text-muted-foreground" title={o.reason}>
+                        {o.reason ?? '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** 数值输入框。空值保留为 undefined，交给后端回退默认，避免被当成 0 */
+function NumField({
+  label,
+  value,
+  onChange,
+  step,
+}: {
+  label: string
+  value: number | undefined
+  onChange: (v: string) => void
+  step: number
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <input
+        type="number"
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        step={step}
+        min={0}
+        className="rounded-md border bg-background px-2 py-1.5 text-sm"
+      />
+    </label>
   )
 }
 

@@ -29,6 +29,54 @@ export interface GoalSurgeParams {
   confirmHoldMs?: number
 }
 
+/** 下单规模口径：按份数(shares) 或 按金额(usdc，实际份数 = 金额 / 限价) */
+export type OrderSizeMode = 'shares' | 'usdc'
+
+/**
+ * 自动下单参数。全局默认放在 PriceBotConfig.autoTradeDefaults，
+ * 每条规则可用 PriceMonitorRule.autoTradeParams 覆盖其中任意字段。
+ */
+export interface AutoTradeParams {
+  /** 下单规模口径 */
+  sizeMode?: OrderSizeMode
+  /** 标准下单规模：sizeMode=shares 时为份数，=usdc 时为金额 */
+  baseSize?: number
+  /** 单笔最大下单规模（与 baseSize 同口径），封顶用 */
+  maxSize?: number
+  /**
+   * 穿价缓冲：在 bestAsk 之上再加的价格让步。
+   *
+   * 提高成交率的关键。进球瞬间 ask 在快速上移，从「决策」到「订单落到撮合」
+   * 有网络+签名延迟（实测百毫秒级），按当时 ask 挂单很容易已经挂空。
+   * 多让几个 tick 换成交确定性。
+   */
+  slippageBuffer?: number
+  /** 买入价硬上限：算出来的限价超过该值就放弃（保住到 1.0 的利润空间） */
+  maxBuyPrice?: number
+  /** 每条规则累计最多下单笔数（跨重启，从库里数） */
+  maxOrdersPerRule?: number
+  /** 全局每日最多下单笔数（跨重启，按自然日 UTC 数） */
+  maxOrdersPerDay?: number
+  /** 全局累计下单金额上限（USDC，按自然日 UTC 计） */
+  maxDailyNotional?: number
+  /** 价格 tick，用于把限价对齐到合法档位 */
+  tickSize?: number
+}
+
+export const DEFAULT_AUTO_TRADE: Required<AutoTradeParams> = {
+  sizeMode: 'usdc',
+  baseSize: 20,
+  maxSize: 50,
+  // 默认 2 个 tick（0.01 tick 下 = 0.02）。穿价买入时宁可多付一点也要成交。
+  slippageBuffer: 0.02,
+  // 0.97 以上买入到 1.0 的空间已不足 3%，扣掉滑点不值得。
+  maxBuyPrice: 0.97,
+  maxOrdersPerRule: 2,
+  maxOrdersPerDay: 20,
+  maxDailyNotional: 200,
+  tickSize: 0.01,
+}
+
 export interface PriceBotConfig {
   enabled: boolean
   pollIntervalMs: number
@@ -56,8 +104,16 @@ export interface PriceBotConfig {
   sampleMinIntervalMs: number
   /** 采样缓冲区刷盘间隔（毫秒），批量 INSERT 以免拖慢评估路径 */
   sampleFlushIntervalMs: number
-  /** 是否启用自动下单（本期占位，默认 false：只记录、不真下单） */
+/**
+   * 自动下单总开关。
+   *
+   * 与规则级 PriceMonitorRule.autoTradeEnabled 是「与」关系：
+   * 两者同时为 true 才会真下单。默认 false，且进程重启后回到 false
+   * （配置只存内存，不落库）——这是有意的：动钱的开关不该在无人值守时自己恢复。
+   */
   autoTradeEnabled: boolean
+  /** 自动下单全局默认参数（rule 未配置对应字段时回退） */
+  autoTradeDefaults: AutoTradeParams
   /** 进球买入信号默认参数（rule 未配置对应字段时回退） */
   goalSurgeDefaults: GoalSurgeParams
 }
@@ -76,6 +132,7 @@ export const DEFAULT_CONFIG: PriceBotConfig = {
   sampleMinIntervalMs: 250,
   sampleFlushIntervalMs: 2_000,
   autoTradeEnabled: false,
+  autoTradeDefaults: { ...DEFAULT_AUTO_TRADE },
   goalSurgeDefaults: {
     // 窗口从 3s 放宽到 8s：实测进球后价格常呈阶梯式上行，
     // 3s 窗口只能吃到其中一段，净涨因此达不到阈值。
@@ -131,6 +188,15 @@ export interface PriceMonitorRule extends MatchContext {
   cooldownSeconds: number
   /** 进球买入信号参数（ruleType=goal_surge 时使用），留空回退 config 默认 */
   goalSurgeParams?: GoalSurgeParams
+  /**
+   * 该盘口是否允许自动下单。默认 false。
+   *
+   * 与全局 PriceBotConfig.autoTradeEnabled 取「与」：总开关关掉时
+   * 这里为 true 也不下单；总开关打开时只对本字段为 true 的盘口下单。
+   */
+  autoTradeEnabled?: boolean
+  /** 该盘口的自动下单参数覆盖，留空回退 config.autoTradeDefaults */
+  autoTradeParams?: AutoTradeParams
   enabled: boolean
   createdAt?: string
   updatedAt?: string
@@ -323,6 +389,46 @@ export interface ConnectionState {
    * 该窗口内 percent_change 类规则被抑制。
    */
   volatileUntil: number | null
+}
+
+// ==================== 自动下单记录 ====================
+
+/**
+ * 下单尝试的最终状态。
+ *
+ * skipped 表示被风控/参数拦下，压根没提交给交易所——它同样落库，
+ * 否则「为什么这次信号没下单」只能靠翻日志猜。
+ */
+export type AutoOrderStatus = 'placed' | 'failed' | 'skipped' | 'simulated'
+
+export interface AutoOrderRecord extends MatchContext {
+  id?: number
+  botId: string
+  ruleId: number
+  tokenId: string
+  marketId: string
+  eventId: string
+  outcome: string
+  /** 实际提交的限价（已含穿价缓冲、已对齐 tick） */
+  limitPrice: number
+  /** 实际提交的份数 */
+  size: number
+  /** 名义金额 = limitPrice * size */
+  notional: number
+  sizeMode: OrderSizeMode
+  status: AutoOrderStatus
+  /** skipped/failed 的原因，便于回溯风控命中项 */
+  reason?: string
+  /** 决策当时的盘口，用于事后复盘成交率 */
+  bestBid?: number | null
+  bestBidSize?: number | null
+  bestAsk?: number | null
+  bestAskSize?: number | null
+  /** trading.ts 落库的订单主键（soccer_orders.id） */
+  tradeOrderId?: number | null
+  /** CLOB 侧订单号 */
+  clobOrderId?: string | null
+  createdAt?: string
 }
 
 // ==================== 机器人状态 ====================

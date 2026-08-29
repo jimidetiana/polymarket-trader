@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "soccer": "npm run frontend:build && tsx src/soccer/server.ts",
-    "soccer:fetch": "tsx src/soccer/fetcher.ts"
+    "soccer:fetch": "tsx src/soccer/fetcher.ts",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@polymarket/builder-relayer-client": "^0.0.10",
