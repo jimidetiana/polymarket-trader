@@ -869,7 +869,7 @@ function BotCard({
         {runState.key === 'settled' && (
           <span
             className="inline-flex items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-600"
-            title={`已完结，等待链上结算（${rule.settledAt ? new Date(rule.settledAt).toLocaleString('zh-CN') : ''}）`}
+            title={`已完结，等待链上结算（${rule.settledAt ? formatBeijingTime(rule.settledAt) : ''}）`}
           >
             <CheckCircle2 className="h-3 w-3" />
             待结算

@@ -343,8 +343,10 @@ export async function createRule(rule: Omit<PriceMonitorRule, 'id' | 'createdAt'
        (token_id, market_id, event_id, outcome, rule_type, direction,
         percent_threshold, target_price, price_low, price_high, goal_surge_params,
         auto_trade_enabled, auto_trade_params,
-        signal_type, cooldown_seconds, enabled)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        signal_type, cooldown_seconds, enabled,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
     [
       rule.tokenId,
       rule.marketId,
@@ -406,8 +408,10 @@ export async function updateRule(id: number, updates: Partial<PriceMonitorRule>)
   if (!sets.length) return false
 
   params.push(id)
+  // updated_at 显式写 UTC_TIMESTAMP()：列上的 ON UPDATE CURRENT_TIMESTAMP 走的是
+  // MySQL 服务器本地时钟（UTC+8），显式赋值可以覆盖掉那个默认行为，保持库内统一 UTC。
   const [result] = await pool.execute<any>(
-    `UPDATE price_bot_rules SET ${sets.join(', ')} WHERE id = ?`,
+    `UPDATE price_bot_rules SET ${sets.join(', ')}, updated_at = UTC_TIMESTAMP() WHERE id = ?`,
     params,
   )
   return result.affectedRows > 0
@@ -443,11 +447,16 @@ export async function deleteRule(id: number): Promise<boolean> {
 export async function recordTrigger(record: Omit<PriceTriggerRecord, 'id' | 'triggeredAt'>): Promise<number> {
   await ensureTables()
   const [result] = await pool.execute<any>(
+    // triggered_at 显式写 UTC_TIMESTAMP()：列上的 DEFAULT CURRENT_TIMESTAMP
+    // 取的是 MySQL 服务器本地时钟（这里是 UTC+8），而 recordLogsBatch 走
+    // mysql2 的 timezone:'Z' 存的是 UTC，两条路径混用就差整 8 小时。
+    // 读取端 toIsoUtc 无条件补 Z，本地时间被当 UTC 解析后前端再转北京时间，
+    // 于是又多加 8 小时。统一以 UTC 落库是唯一不会二次踩坑的口径。
     `INSERT INTO price_bot_triggers
        (bot_id, rule_id, token_id, market_id, event_id, outcome,
         rule_type, direction, previous_price, current_price,
-        change_percent, threshold, signal_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        change_percent, threshold, signal_type, triggered_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
     [
       record.botId,
       record.ruleId,
@@ -538,10 +547,14 @@ export async function getLastTriggerTime(ruleId: number): Promise<string | null>
 export async function recordLog(log: Omit<PriceBotLog, 'id' | 'loggedAt'>): Promise<number> {
   await ensureTables()
   const [result] = await pool.execute<any>(
+    // logged_at 显式写 UTC：这个函数负责 buy_signal/start/stop/trigger/
+    // disconnect/reconnect，此前落列默认值（服务器本地时钟），而同表的
+    // price_update 由 recordLogsBatch 以 UTC 写入——同一张表里两种基准，
+    // 前端把两类日志混在一个时间轴上看就差 8 小时。
     `INSERT INTO price_bot_logs
        (rule_id, token_id, event_id, outcome, action, price,
-        best_bid, best_bid_size, best_ask, best_ask_size, source, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        best_bid, best_bid_size, best_ask, best_ask_size, source, detail, logged_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
     [
       log.ruleId,
       log.tokenId,
@@ -667,12 +680,14 @@ export async function recordAutoOrder(
 ): Promise<number> {
   await ensureTables()
   const [result] = await pool.execute<any>(
+    // created_at 显式写 UTC_TIMESTAMP()：列上的 DEFAULT CURRENT_TIMESTAMP
+    // 取的是 MySQL 服务器本地时钟（UTC+8），与其他写入路径不一致
     `INSERT INTO price_bot_orders
        (bot_id, rule_id, token_id, market_id, event_id, outcome,
         limit_price, size, notional, size_mode, status, reason,
         best_bid, best_bid_size, best_ask, best_ask_size,
-        trade_order_id, clob_order_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        trade_order_id, clob_order_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
     [
       order.botId,
       order.ruleId,
@@ -812,10 +827,11 @@ export async function recordConnectionEvent(
 ): Promise<number> {
   await ensureTables()
   const [result] = await pool.execute<any>(
+    // created_at 同上，统一按 UTC 落库
     `INSERT INTO price_bot_connection_events
        (bot_id, event_type, reason, close_code, downtime_ms, subscribed_tokens,
-        price_before, price_after, price_delta, token_id, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        price_before, price_after, price_delta, token_id, detail, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
     [
       event.botId,
       event.eventType,
