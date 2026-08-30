@@ -47,7 +47,7 @@ export function alignPriceUp(price: number, tickSize: number): number {
 }
 
 /**
- * 计算买入限价。以成交率为首要目标。
+ * 计算买入限价。以成交率为首要目标，但不接受无上限的溢价。
  *
  * 关键取舍：以 bestAsk 而非 bestBid 作基准。挂在 bestBid 上是 maker 单，
  * 要等别人来卖才成交；而进球瞬间价格正在快速上行，挂 bid 基本等于挂空。
@@ -55,6 +55,12 @@ export function alignPriceUp(price: number, tickSize: number): number {
  * 多付的那点价差换来的是「拿得到货」。
  *
  * 缓冲同时覆盖决策到撮合之间（签名+网络，百毫秒级）ask 的继续上移。
+ *
+ * 但纯跟 ask 在宽价差盘口会失控：实测 486 次「限价0.9900 ≥ 上限0.97」中，
+ * bestBid 多在 0.85~0.90，是 ask 挂到 0.97 加缓冲顶上去的。那种价位买进去
+ * 赢了只赚 1%、错了归零，赔率极差。maxPremiumOverBid 把限价压回 bid 附近，
+ * 代价是可能挂不上——挂不上远好过在 0.99 接盘。
+ *
  * 返回 null 表示无法定价（ask 与 bid 均不可用）。
  */
 export function computeBuyLimitPrice(
@@ -75,6 +81,17 @@ export function computeBuyLimitPrice(
     basis = `bestBid(${snapshot.bestBid.toFixed(4)})+2×缓冲(${buffer * 2})[无ask]`
   } else {
     return null
+  }
+
+  // 溢价上限：只在有 bid 可参照时生效。无 bid 时没有「市场共识价」可比，
+  // 硬套上限会把价格压到毫无意义的位置，交给下限/价差闸门去管。
+  const premiumCap = p.maxPremiumOverBid ?? 0
+  if (premiumCap > 0 && snapshot.bestBid != null && snapshot.bestBid > 0) {
+    const ceiling = snapshot.bestBid + premiumCap
+    if (raw > ceiling) {
+      raw = ceiling
+      basis += `→压到bid+溢价上限(${premiumCap})`
+    }
   }
 
   const aligned = alignPriceUp(raw, p.tickSize)

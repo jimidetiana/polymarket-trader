@@ -69,6 +69,16 @@ export interface AutoTradeParams {
    * ask 会远离真实价值，照它下单等于按天价接货。
    */
   maxSpread?: number
+  /**
+   * 相对 bestBid 的最大溢价：限价不得超过 bestBid + 该值。
+   *
+   * 无条件跟 bestAsk 报价，在宽价差盘口等于全盘接受对手方的要价。
+   * 实测 486 次「限价0.9900 ≥ 上限0.97」里，bestBid 多在 0.85~0.90，
+   * 是 ask 挂到 0.97 再加缓冲顶上去的——赢了只赚 1%，判断错则归零。
+   * 用它把限价压回 bid 附近：可能挂不上，但挂不上比在 0.99 接盘好。
+   * 设 0 表示不限制（退回纯 ask 穿价）。
+   */
+  maxPremiumOverBid?: number
   /** 每条规则累计最多下单笔数（跨重启，从库里数） */
   maxOrdersPerRule?: number
   /** 全局每日最多下单笔数（跨重启，按自然日 UTC 数） */
@@ -91,6 +101,8 @@ export const DEFAULT_AUTO_TRADE: Required<AutoTradeParams> = {
   minBuyPrice: 0.6,
   // 0.10 已是正常价差的数倍，再宽就是薄盘。
   maxSpread: 0.1,
+  // 0.04：容得下正常价差 + 穿价缓冲，又挡住「bid 0.85 / ask 0.97」这类接盘。
+  maxPremiumOverBid: 0.04,
   maxOrdersPerRule: 2,
   maxOrdersPerDay: 20,
   maxDailyNotional: 200,

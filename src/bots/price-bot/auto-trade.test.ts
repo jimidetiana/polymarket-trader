@@ -71,6 +71,60 @@ test('负缓冲被归零，不会低于 ask 挂成永不成交的单', () => {
   assert.equal(r!.price, 0.62)
 })
 
+test('宽价差盘口的限价被压回 bid+溢价上限，不去 0.99 接盘', () => {
+  // 实测形态：bid 0.85 / ask 0.97，纯跟 ask 会算出 0.99——赢只赚 1%，错则归零
+  const r = computeBuyLimitPrice(
+    snap(0.85, 0.97),
+    P({ slippageBuffer: 0.02, maxPremiumOverBid: 0.04 }),
+  )
+  assert.ok(r)
+  assert.equal(r!.price, 0.89)
+  assert.match(r!.basis, /溢价上限/)
+})
+
+test('溢价上限设 0 即不限制，退回纯 ask 穿价', () => {
+  const r = computeBuyLimitPrice(
+    snap(0.85, 0.97),
+    P({ slippageBuffer: 0.02, maxPremiumOverBid: 0 }),
+  )
+  assert.ok(r)
+  assert.equal(r!.price, 0.99)
+  assert.doesNotMatch(r!.basis, /溢价上限/)
+})
+
+test('正常价差不受溢价上限干扰，该穿的价照穿', () => {
+  const r = computeBuyLimitPrice(
+    snap(0.9, 0.91),
+    P({ slippageBuffer: 0.02, maxPremiumOverBid: 0.04 }),
+  )
+  assert.ok(r)
+  // 0.91 + 0.02 = 0.93，未超 bid+0.04 = 0.94
+  assert.equal(r!.price, 0.93)
+  assert.doesNotMatch(r!.basis, /溢价上限/)
+})
+
+test('无 bid 时溢价上限不生效：没有共识价可参照', () => {
+  const r = computeBuyLimitPrice(
+    snap(null, 0.97),
+    P({ slippageBuffer: 0.02, maxPremiumOverBid: 0.04 }),
+  )
+  assert.ok(r)
+  assert.equal(r!.price, 0.99)
+  assert.doesNotMatch(r!.basis, /溢价上限/)
+})
+
+test('无 ask 的 bid 兜底同样受溢价上限约束', () => {
+  // bid 0.85 + 2×0.03 = 0.91 > 上限 0.89，压回 0.89
+  const r = computeBuyLimitPrice(
+    snap(0.85, null),
+    P({ slippageBuffer: 0.03, maxPremiumOverBid: 0.04 }),
+  )
+  assert.ok(r)
+  assert.equal(r!.price, 0.89)
+  assert.match(r!.basis, /无ask/)
+  assert.match(r!.basis, /溢价上限/)
+})
+
 test('usdc 口径：份数 = 金额/限价，取整数份且名义额不超预算', () => {
   const p = P({ sizeMode: 'usdc', baseSize: 20, maxSize: 50 })
   const size = computeOrderSize(0.64, p)

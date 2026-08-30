@@ -1924,7 +1924,32 @@ const server = app.listen(PORT, async () => {
   // 启动时同步一次订单状态，之后每 30 秒自动同步
   runOrderSync();
   setInterval(runOrderSync, 30 * 1000);
+
+  // 价格机器人自恢复
+  await restorePriceBot();
 });
+
+/**
+ * 进程重启后自动把价格机器人接回来。
+ *
+ * 以前只有前端点「启动」才会调 startPriceBot，所以每次重启都要人工补一次。
+ * 实测 8/26~8/30 的 80 小时跨度里有 46 小时完全没有 price_update 采样，
+ * 缺口不是 WS 断联造成的（连接事件只有一次 36 分钟的断联），
+ * 而是进程起来之后没人去点启动——监控和采样就一直是停着的。
+ *
+ * 只恢复监控与采样，不动自动下单总开关：那个开关按设计每次重启都回到关闭，
+ * 需要人明确授权才会真下单。恢复失败不阻断 HTTP 服务，打日志即可，
+ * 页面上仍可手动启动。
+ */
+async function restorePriceBot(): Promise<void> {
+  try {
+    await startPriceBot();
+    const status = getPriceBotStatus();
+    console.log(`[PriceBot] 启动自恢复完成，监控中 ${status.monitors?.length ?? 0} 条规则`);
+  } catch (err: any) {
+    console.error('[PriceBot] 启动自恢复失败，需在页面手动启动:', err?.message ?? err);
+  }
+}
 
 // WebSocket proxy: frontend → backend → Polymarket (through HTTP proxy)
 const WS_UPSTREAM = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';

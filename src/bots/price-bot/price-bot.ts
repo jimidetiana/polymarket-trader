@@ -1494,18 +1494,21 @@ async function reserveBuyOrder(
     await finish('skipped', 0, 0, '无法定价：bestAsk/bestBid 均缺失')
     return
   }
-  if (priced.price >= p.maxBuyPrice) {
-    await finish('skipped', priced.price, 0,
-      `限价${priced.price.toFixed(4)} ≥ 上限${p.maxBuyPrice}，利润空间不足`)
-    return
-  }
 
   // ---- 盘口质量：价格下限 + 价差上限 ----
-  // 放在规模换算之前：这两项否掉的是「这一单压根不该下」，
-  // 先算份数再否等于白算，而且 reason 里会混进无关的份数信息。
+  // 必须排在「限价上限」之前。宽价差盘口会同时触发两个闸门（bid 0.85/ask 0.97
+  // 既价差超限、算出的限价也撞上限），先撞哪个就记哪个 reason。实测 486 次记成
+  // 「利润空间不足」的里面混着大量真正的薄盘，归因被掩盖。价差是根本原因，
+  // 「限价太高」只是它的后果，所以让价差先判。
   const quality = evaluateBookQuality(snapshot, p)
   if (quality) {
     await finish('skipped', priced.price, 0, quality)
+    return
+  }
+
+  if (priced.price >= p.maxBuyPrice) {
+    await finish('skipped', priced.price, 0,
+      `限价${priced.price.toFixed(4)} ≥ 上限${p.maxBuyPrice}，利润空间不足`)
     return
   }
 
