@@ -941,6 +941,8 @@ export interface PriceMonitorRule {
   signalType: 'buy_signal' | 'sell_signal' | 'alert'
   cooldownSeconds: number
   enabled: boolean
+  /** 手动完结时刻。有值 = 已完结、等待链上结算 */
+  settledAt?: string
   createdAt?: string
   updatedAt?: string
   // listRules LEFT JOIN 带出的比赛/盘口上下文（与 MatchContext 一致，均可选）

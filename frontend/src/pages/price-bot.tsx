@@ -158,6 +158,25 @@ function primaryTitleOf(rule: PriceMonitorRule): string {
   return rule.matchName || RULE_TYPE_LABELS[rule.ruleType] || rule.ruleType
 }
 
+/**
+ * 机器人运行状态：监控中 / 待结算 / 已停止。
+ *
+ * 「待结算」优先于「已停止」——完结必然伴随停用，若先判 running
+ * 就永远看不到待结算。三处渲染（列表圆点、列表标签、详情统计卡）
+ * 共用这一个判定，避免各写一遍后逐渐不一致。
+ */
+type RuleRunState = { key: 'running' | 'settled' | 'stopped'; label: string; dotClass: string; textClass: string }
+
+function runStateOf(rule: PriceMonitorRule, monitor?: PriceMonitorState | null): RuleRunState {
+  if (monitor?.running) {
+    return { key: 'running', label: '监控中', dotClass: 'bg-green-500 animate-pulse', textClass: 'text-green-600' }
+  }
+  if (rule.settledAt) {
+    return { key: 'settled', label: '待结算', dotClass: 'bg-amber-500', textClass: 'text-amber-600' }
+  }
+  return { key: 'stopped', label: '已停止', dotClass: 'bg-gray-400', textClass: 'text-muted-foreground' }
+}
+
 export default function PriceBotPage() {
   const [status, setStatus] = useState<PriceBotStatus | null>(null)
   const [rules, setRules] = useState<PriceMonitorRule[]>([])
@@ -476,7 +495,7 @@ export default function PriceBotPage() {
     const label = primaryTitleOf(rule)
     if (!confirm(
       `完结「${label}」？\n\n` +
-      `· 停止监控并禁用该规则（记录保留）\n` +
+      `· 停止监控，该机器人状态改为「待结算」（记录保留）\n` +
       `· 自动接上同场下一档大小球盘口并开始监控\n` +
       `· 下一档默认不授权自动下单，需要你再点一次「授权下单」`
     )) return
@@ -795,7 +814,7 @@ function BotCard({
   onClick: () => void
 }) {
   const sig = SIGNAL_LABELS[rule.signalType] ?? SIGNAL_LABELS.alert
-  const isRunning = monitor?.running ?? false
+  const runState = runStateOf(rule, monitor)
   const suffix = marketSuffixOf(rule.marketName)
   const price = monitor?.lastPrice
 
@@ -817,10 +836,8 @@ function BotCard({
     >
       <div className="flex items-center gap-2">
         <span
-          className={cn(
-            'inline-flex h-2 w-2 shrink-0 rounded-full',
-            isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-400',
-          )}
+          className={cn('inline-flex h-2 w-2 shrink-0 rounded-full', runState.dotClass)}
+          title={runState.label}
         />
         <p className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
           {primaryTitleOf(rule)}
@@ -847,6 +864,15 @@ function BotCard({
           >
             <ShoppingCart className="h-3 w-3" />
             自动
+          </span>
+        )}
+        {runState.key === 'settled' && (
+          <span
+            className="inline-flex items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-600"
+            title={`已完结，等待链上结算（${rule.settledAt ? new Date(rule.settledAt).toLocaleString('zh-CN') : ''}）`}
+          >
+            <CheckCircle2 className="h-3 w-3" />
+            待结算
           </span>
         )}
         <span className="text-xs text-muted-foreground">{rule.outcome}</span>
@@ -1036,7 +1062,7 @@ function BotDetail({
             collapsed={collapsed.has('status')}
             onToggle={() => toggle('status')}
           >
-            <StatusSection monitor={monitor} />
+            <StatusSection rule={rule} monitor={monitor} />
           </Section>
 
           <Section
@@ -1196,21 +1222,23 @@ function RuleSection({ rule }: { rule: PriceMonitorRule }) {
 
 // ==================== 监控状态区块 ====================
 
-function StatusSection({ monitor }: { monitor: PriceMonitorState | null }) {
+function StatusSection({ rule, monitor }: { rule: PriceMonitorRule; monitor: PriceMonitorState | null }) {
+  const runState = runStateOf(rule, monitor)
   if (!monitor) {
     return (
       <div className="p-6 text-center text-sm text-muted-foreground">
-        该机器人尚未启动监控
+        {runState.key === 'settled'
+          ? `该机器人已完结，等待链上结算${rule.settledAt ? `（${formatBeijingTime(rule.settledAt)}）` : ''}`
+          : '该机器人尚未启动监控'}
       </div>
     )
   }
   return (
     <div className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-3">
-      <KV
-        label="运行状态"
-        value={monitor.running ? '监控中' : '已停止'}
-        className={monitor.running ? 'text-green-600' : 'text-muted-foreground'}
-      />
+      <KV label="运行状态" value={runState.label} className={runState.textClass} />
+      {runState.key === 'settled' && rule.settledAt && (
+        <KV label="完结时间" value={formatBeijingTime(rule.settledAt)} />
+      )}
       <KV label="当前价" value={fmtPrice(monitor.lastPrice)} className="font-mono" />
       <KV label="基准价" value={fmtPrice(monitor.baselinePrice)} className="font-mono" />
       <KV label="触发次数" value={`${monitor.triggerCount} 次`} />

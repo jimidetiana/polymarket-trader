@@ -245,6 +245,11 @@ async function ensureRuleColumns(): Promise<void> {
     // 规则级自动下单开关。默认 0：新建/存量规则都不会因为打开总开关就突然开始下单。
     ['auto_trade_enabled', 'TINYINT(1) NOT NULL DEFAULT 0', null],
     ['auto_trade_params', 'JSON DEFAULT NULL', 'TEXT DEFAULT NULL'],
+    // 手动完结时刻。不加 status 枚举列是有意的：
+    // 「待结算」与 enabled=0 是两个正交的事实（被完结 vs 被手动停用），
+    // 塞进同一个枚举就没法区分「完结后又被重新启用」这种状态。
+    // NULL = 未完结，有值 = 已完结待链上结算。
+    ['settled_at', 'DATETIME DEFAULT NULL', null],
   ]
 
   for (const [name, ddl, fallback] of additions) {
@@ -404,6 +409,22 @@ export async function updateRule(id: number, updates: Partial<PriceMonitorRule>)
   const [result] = await pool.execute<any>(
     `UPDATE price_bot_rules SET ${sets.join(', ')} WHERE id = ?`,
     params,
+  )
+  return result.affectedRows > 0
+}
+
+/**
+ * 标记 / 取消「已完结待结算」。
+ *
+ * 不走 updateRule 是因为它按 `!== undefined` 判断要不要写该列，
+ * 传 undefined 会被当成「不改这一列」，于是没法把 settled_at 清回 NULL。
+ * 这里显式区分：settled=true 写当前时间，false 写 NULL。
+ */
+export async function markRuleSettled(id: number, settled: boolean): Promise<boolean> {
+  await ensureTables()
+  const [result] = await pool.execute<any>(
+    `UPDATE price_bot_rules SET settled_at = ${settled ? 'UTC_TIMESTAMP()' : 'NULL'} WHERE id = ?`,
+    [id],
   )
   return result.affectedRows > 0
 }
@@ -1015,6 +1036,7 @@ function rowToRule(row: any): PriceMonitorRule {
     signalType: row.signal_type as any,
     cooldownSeconds: Number(row.cooldown_seconds),
     enabled: row.enabled === 1 || row.enabled === true,
+    settledAt: row.settled_at != null ? toIsoUtc(row.settled_at) : undefined,
     createdAt: toIsoUtc(row.created_at),
     updatedAt: toIsoUtc(row.updated_at),
   }

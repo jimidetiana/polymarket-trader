@@ -217,6 +217,13 @@ export interface PriceMonitorRule extends MatchContext {
   autoTradeEnabled?: boolean
   /** 该盘口的自动下单参数覆盖，留空回退 config.autoTradeDefaults */
   autoTradeParams?: AutoTradeParams
+  /**
+   * 手动完结时刻（ISO）。有值表示已完结、等待链上结算。
+   *
+   * 与 enabled 正交：完结必然伴随停用，但停用不代表完结
+   * （也可能只是手动关掉）。两者分开存才能区分这两种情况。
+   */
+  settledAt?: string
   enabled: boolean
   createdAt?: string
   updatedAt?: string

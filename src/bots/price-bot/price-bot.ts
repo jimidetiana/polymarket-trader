@@ -23,6 +23,7 @@ import {
   createRule as dbCreateRule,
   updateRule as dbUpdateRule,
   deleteRule as dbDeleteRule,
+  markRuleSettled as dbMarkRuleSettled,
   recordTrigger,
   listTriggers,
   getLastTriggerTime,
@@ -2121,6 +2122,18 @@ export async function deleteRule(id: number): Promise<boolean> {
   const ok = await dbDeleteRule(id)
   ruleCache.delete(id)
   state.monitors.delete(id)
+  return ok
+}
+
+/**
+ * 标记 / 取消「已完结待结算」，并同步刷新规则缓存。
+ *
+ * 单独包一层而不让 server 直接调 db，是因为评估路径同步读 ruleCache——
+ * 只改库不刷缓存的话，settledAt 在进程内一直是旧值。
+ */
+export async function markRuleSettled(id: number, settled: boolean): Promise<boolean> {
+  const ok = await dbMarkRuleSettled(id, settled)
+  await refreshRuleCache(id)
   return ok
 }
 

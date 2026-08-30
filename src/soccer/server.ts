@@ -62,6 +62,7 @@ import {
   createRule,
   updateRule,
   deleteRule,
+  markRuleSettled,
   getRule,
   listRules,
   listTriggers,
@@ -458,19 +459,43 @@ const TOTAL_GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5];
 const FIRST_TOTAL_LINE = 0.5;
 
 /**
- * 取出大小球盘口的总进球数线。非大小球盘或角球盘返回 null。
+ * 只认「全场、双方合计」的大小球盘。其余一律返回 null。
  *
  * 线可能存在于两处：DB 的 line 列（DECIMAL，mysql2 返回字符串），
  * 或问题文本里的 "X.5"。平台并非所有大小球盘都填了 line 列，
  * 故两处都取候选值，任一命中白名单即算有效，避免把有效盘口误杀。
  *
- * 角球盘要排除：classifyMarketType 把含 over/under 的角球盘也归入了 total，
- * 而平台角球盘几乎无人交易。
+ * 三类要排除的盘口，都会被 classifyMarketType 归成 total：
+ *
+ * 1. 角球盘（含 over/under 字样），平台上几乎无人交易。
+ * 2. 半场/下半场盘。MARKET_TYPE_KEYWORDS 里 halftime/second_half 排在 total
+ *    之前且先命中先返回，所以多数已被归成 halftime——但那依赖关键词写法，
+ *    "Over/Under 1.5 in the first half" 这类词序就漏了，这里再兜一层。
+ * 3. 单独一方球队的进球盘（"Will Arsenal score over 1.5 goals?"）。
+ *    它和全场大小球的价格逻辑完全不同：进球方是谁决定它动不动，
+ *    进球买入的前提「任意进球都推高价格」在这里不成立。
  */
 function extractTotalGoalLine(m: { question_en?: unknown; question_zh?: unknown; line?: unknown }): number | null {
   const qEn = String(m.question_en ?? '').toLowerCase();
   const qZh = String(m.question_zh ?? '');
+
   if (qEn.includes('corner') || qZh.includes('角球')) return null;
+
+  // 半场盘：兜 classifyMarketType 因词序而漏掉的写法
+  if (/half|1st h|2nd h/.test(qEn) || qZh.includes('半场')) return null;
+
+  // 单队盘：全场大小球的问法是「这场比赛总进球数」，主语是比赛；
+  // 单队盘的主语是球队（"Will X score..." / "X to score over..."）。
+  // 用「是否出现 total goals / 双方合计」正面判定比枚举队名可靠。
+  const isMatchTotal =
+    /total\s+goals/.test(qEn) ||
+    /combined/.test(qEn) ||
+    qZh.includes('总进球') ||
+    // "A vs B: O/U 2.5" 这种标题式写法，冒号前是对阵双方
+    /\bvs\.?\b.*\b(o\/u|over\/under)\b/.test(qEn);
+  const looksTeamSpecific =
+    /\bwill\s+.+\s+score\b/.test(qEn) || /\bto\s+score\s+(over|under)\b/.test(qEn);
+  if (looksTeamSpecific && !isMatchTotal) return null;
 
   const candidates: number[] = [];
   if (m.line != null) {
@@ -1492,11 +1517,16 @@ app.post('/api/bots/price-bot/rules', asyncHandler(async (req, res) => {
 
 app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res) => {
   // 一键批量创建：取「即将开赛」的前 5 场（not_started，按临近开赛升序），
-  // 对每场的 大小球(total) 盘口建 Over 监控、谁先进球(first_scorer) 盘口建 Yes 监控。
+  // 每场只建**全场大小球 Over 0.5** 一条规则。
   //
-  // 大小球只建 0.5 这一条线（见 FIRST_TOTAL_LINE）。1.5 及以上在 0.5 未打出前
-  // 没有意义：0 球时 Over 1.5 的价格只是 Over 0.5 的影子，进球瞬间两者同涨，
-  // 监控它等于把同一个信号数了两遍，还平摊了额度。更高的线由「完结并开下一档」
+  // 为什么只有这一种：进球买入的信号模型目前只在这个盘口上验证过。
+  // 首球盘(first_scorer)、半场盘、单队进球盘的价格形态与全场大小球不同
+  // （尤其首球盘一旦有人进球另一边直接归零，不是「奔向 1.0」的形态），
+  // 用同一套阈值去跑等于拿没验证过的假设去下单。等这个盘口跑成熟再逐个加。
+  //
+  // 线也只建 0.5（见 FIRST_TOTAL_LINE）。1.5 及以上在 0.5 未打出前没有意义：
+  // 0 球时 Over 1.5 的价格只是 Over 0.5 的影子，进球瞬间两者同涨，监控它
+  // 等于把同一个信号数了两遍，还平摊了额度。更高的线由「完结并开下一档」
   // 在 0.5 打出后按需接上。
   const events = (await getEventsWithMarkets())
     .filter((e: any) => e.match_status === 'not_started')
@@ -1514,12 +1544,13 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
     const markets = await getMarketsForEvent(eventId);
     for (const m of markets) {
       const marketType = String(m.market_type);
-      if (marketType !== 'total' && marketType !== 'first_scorer') continue;
+      if (marketType !== 'total') continue;
 
-      // 大小球只取 0.5：非大小球线/角球盘由 extractTotalGoalLine 返回 null 而剔除
-      if (marketType === 'total' && extractTotalGoalLine(m) !== FIRST_TOTAL_LINE) continue;
+      // 只取全场双方合计的 Over 0.5。半场盘/单队盘/角球盘/其它线
+      // 都由 extractTotalGoalLine 返回 null 或别的值而被剔除。
+      if (extractTotalGoalLine(m) !== FIRST_TOTAL_LINE) continue;
 
-      const wanted = marketType === 'total' ? 'over' : 'yes'; // 大小球监控 Over，首球监控 Yes
+      const wanted = 'over';
 
       // outcomes 与 clob_token_ids 索引对齐（见 /api/soccer/positions 的配对逻辑）
       const outcomes = parseJsonArray(m.outcomes);
@@ -1584,6 +1615,8 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
   // 先停监控再禁用：反过来的话监控还在跑，可能在禁用生效前又触发一次
   stopMonitor(id);
   await updateRule(id, { enabled: false, autoTradeEnabled: false });
+  // 标记待结算：与 enabled=0 分开存，这样「完结」和「手动停用」在列表上能区分开
+  await markRuleSettled(id, true);
 
   const result: {
     settled: { ruleId: number; line: number | null };
@@ -1679,11 +1712,15 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
 
 app.put('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
-  const ok = await updateRule(id, req.body || {});
+  const body = req.body || {};
+  const ok = await updateRule(id, body);
   if (!ok) {
     res.status(404).json({ success: false, error: '规则不存在' });
     return;
   }
+  // 重新启用等于「这个盘口又要跑了」，待结算标记必须清掉，
+  // 否则列表上会同时显示「监控中」和「待结算」两个矛盾的状态
+  if (body.enabled === true) await markRuleSettled(id, false);
   const rule = await getRule(id);
   res.json({ success: true, rule });
 }));
