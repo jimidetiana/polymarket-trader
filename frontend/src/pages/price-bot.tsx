@@ -95,12 +95,13 @@ const MATCH_STATUS_BADGE: Record<string, { label: string; className: string }> =
 }
 
 /** 左侧列表状态过滤标签 */
-type StatusFilterKey = 'all' | 'live' | 'not_started' | 'ended'
+type StatusFilterKey = 'all' | 'live' | 'not_started' | 'ended' | 'settled'
 const STATUS_FILTER_TABS: { key: StatusFilterKey; label: (c: Record<string, number>) => string }[] = [
   { key: 'all', label: (c) => `全部 (${c.all})` },
   { key: 'live', label: (c) => `进行中 (${c.live})` },
   { key: 'not_started', label: (c) => `即将开始 (${c.not_started})` },
   { key: 'ended', label: (c) => `已结束 (${c.ended})` },
+  { key: 'settled', label: (c) => `待结算 (${c.settled})` },
 ]
 
 /** 左侧列表盘口过滤标签：大小球线(0.5–4.5) + 首球(谁先进球) */
@@ -296,18 +297,28 @@ export default function PriceBotPage() {
   const selectedMonitor = selectedRuleId != null ? monitorMap.get(selectedRuleId) ?? null : null
 
   // 左侧列表按比赛状态过滤（matchStatus 由后端 listRules 现算带出）
+  //
+  // 手动完结（settledAt 有值）的规则已经停止监控，只是在等链上结算，
+  // 不该再混在「进行中」里——那一栏是用来看「还在盯的盘口」的。
+  // 所以待结算单独成一栏，并从其余三栏排除。
   const statusCounts = useMemo(() => {
-    const live = rules.filter((r) => r.matchStatus === 'live').length
-    const not_started = rules.filter((r) => r.matchStatus === 'not_started').length
-    const ended = rules.filter((r) => r.matchStatus === 'ended').length
-    return { all: rules.length, live, not_started, ended }
+    const settled = rules.filter((r) => r.settledAt).length
+    const active = rules.filter((r) => !r.settledAt)
+    const live = active.filter((r) => r.matchStatus === 'live').length
+    const not_started = active.filter((r) => r.matchStatus === 'not_started').length
+    const ended = active.filter((r) => r.matchStatus === 'ended').length
+    return { all: rules.length, live, not_started, ended, settled }
   }, [rules])
 
   const filteredRules = useMemo(() => {
     const mf = MARKET_FILTER_TABS.find((t) => t.key === marketFilter) ?? MARKET_FILTER_TABS[0]
-    return rules.filter(
-      (r) => (statusFilter === 'all' || r.matchStatus === statusFilter) && mf.match(r),
-    )
+    return rules.filter((r) => {
+      if (!mf.match(r)) return false
+      if (statusFilter === 'all') return true
+      if (statusFilter === 'settled') return !!r.settledAt
+      // 其余三栏只看未完结的规则
+      return !r.settledAt && r.matchStatus === statusFilter
+    })
   }, [rules, statusFilter, marketFilter])
 
   // 盘口过滤各标签的计数（全局，与状态计数一致）
