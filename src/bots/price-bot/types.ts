@@ -136,6 +136,19 @@ export interface PriceBotConfig {
   sampleMinIntervalMs: number
   /** 采样缓冲区刷盘间隔（毫秒），批量 INSERT 以免拖慢评估路径 */
   sampleFlushIntervalMs: number
+  /**
+   * 盘口深度定期补拉间隔（毫秒），0 = 关闭。
+   *
+   * WS 的 best_bid_ask / price_change 两类消息只带价格不带挂单量，只有 book
+   * 全量快照才有 size。现有的 size 继承要求价位不变，价格一动就丢——实测
+   * best_bid_size 只有 10.7% 的采样有值（4159/38693），ask 侧 7.4%。
+   * 于是所有「按盘口厚度过滤」「按可成交量定份数」的判断都没有数据可依。
+   *
+   * 这里定期主动拉一次 REST /book 补齐深度。间隔要远大于 restFallbackIntervalMs
+   * （400ms）——那是断联应急，这是常态补数，30 秒足够让 size 有连续覆盖，
+   * 又不至于给 CLOB 增加明显负载。
+   */
+  bookRefreshIntervalMs: number
 /**
    * 自动下单总开关。
    *
@@ -163,6 +176,7 @@ export const DEFAULT_CONFIG: PriceBotConfig = {
   samplePrices: true,
   sampleMinIntervalMs: 250,
   sampleFlushIntervalMs: 2_000,
+  bookRefreshIntervalMs: 30_000,
   autoTradeEnabled: false,
   autoTradeDefaults: { ...DEFAULT_AUTO_TRADE },
   goalSurgeDefaults: {

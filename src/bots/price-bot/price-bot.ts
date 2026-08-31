@@ -690,6 +690,44 @@ function stopRestFallback(): void {
   connState.restFallbackActive = false;
 }
 
+// ==================== 盘口深度定期补拉 ====================
+
+let bookRefreshTimer: NodeJS.Timeout | null = null;
+
+/**
+ * 定期主动拉一次 REST /book，把挂单量补进采样。
+ *
+ * 起因：WS 的 best_bid_ask / price_change 只带价格不带 size，只有 book 全量
+ * 快照有。updatePriceAndEvaluate 里的 size 继承要求价位不变，价格一动就作废，
+ * 所以历史数据里 best_bid_size 只有 10.7% 有值、ask 侧 7.4%。缺了它，
+ * minBidSize / minAskSize 这些门槛实际上长期是「未知即放过」，
+ * 回头做流动性分析也没有数据。
+ *
+ * 与 REST 兜底轮询是两件事：那个 400ms、只在断联期跑、目的是别瞎；
+ * 这个 30s、常态跑、目的是补深度。断联期兜底已经在高频拉全量 book 了，
+ * 此时跳过，避免重复请求。
+ */
+function startBookRefresh(): void {
+  if (bookRefreshTimer) return;
+  const interval = state.config.bookRefreshIntervalMs;
+  if (!interval || interval <= 0) return;
+
+  console.log(`[PriceBot] 启动盘口深度定期补拉 (${interval}ms)`);
+  bookRefreshTimer = setInterval(() => {
+    // 兜底轮询已在高频拉 book，不必再来一次
+    if (connState.restFallbackActive) return;
+    void pollBooksViaRest();
+  }, interval);
+}
+
+function stopBookRefresh(): void {
+  if (bookRefreshTimer) {
+    clearInterval(bookRefreshTimer);
+    bookRefreshTimer = null;
+    console.log('[PriceBot] 停止盘口深度定期补拉');
+  }
+}
+
 async function pollBooksViaRest(): Promise<void> {
   // 上一轮还没回来就跳过，避免请求堆积
   if (restPollInFlight) return;
@@ -1782,6 +1820,7 @@ export async function startMonitors(ruleIds: number[]): Promise<{
   if (started.length > 0) {
     refreshWsSubscription(true)
     startSampleFlush()
+    startBookRefresh()
   }
 
   console.log(
@@ -1802,6 +1841,7 @@ export async function startMonitor(ruleId: number): Promise<void> {
 
   // 规则可以脱离 startBot 单独启动，刷盘定时器在这里也要确保运行
   startSampleFlush()
+  startBookRefresh()
 }
 
 /** 停止单个规则监控 */
@@ -1867,6 +1907,7 @@ export async function startBot(config?: Partial<PriceBotConfig>): Promise<void> 
   // 统一建立 WS 连接
   connectWs()
   startSampleFlush()
+  startBookRefresh()
 
   console.log(
     `[PriceBot] 机器人已启动，共 ${rules.length} 条规则` +
@@ -1887,6 +1928,7 @@ export function stopBot(): void {
   ruleCache.clear()
   closeWs()
   stopSampleFlush()
+  stopBookRefresh()
 
   // 重置连接状态，避免下次启动时残留断联标记导致规则被误抑制
   connState.disconnected = false

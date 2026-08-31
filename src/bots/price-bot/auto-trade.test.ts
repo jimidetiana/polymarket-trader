@@ -13,6 +13,7 @@ import {
   computeOrderSize,
   evaluateBookQuality,
   resolveAutoTradeParams,
+  classifyBookState,
 } from './auto-trade.js'
 import { DEFAULT_AUTO_TRADE } from './types.js'
 import type { PriceSnapshot, AutoTradeParams } from './types.js'
@@ -265,4 +266,69 @@ test('缺 bid 时用 ask 判下限，两者皆缺则交给定价环节', () => {
 
 test('闸门可按规则关掉（下限/价差设 0 即不校验）', () => {
   assert.equal(evaluateBookQuality(snap(0.09, 0.4), P({ minBuyPrice: 0, maxSpread: 0 })), null)
+})
+
+// ==================== 卖出前的盘口守卫 ====================
+
+test('结算清盘不当成亏损：bid 归零而 ask 停在 1.00', () => {
+  // 实测形态：前一帧 1.00，下一帧 bid=0/ask=1。15 段「跌破 0.60 再没恢复」里 11 段是这个
+  const r = classifyBookState(snap(0, 1))
+  assert.equal(r.state, 'settlement-cleared')
+  assert.equal(r.sellable, false)
+  assert.match(r.reason, /结算清盘/)
+})
+
+test('已完结的规则一律不按价格卖，哪怕盘口看着正常', () => {
+  const r = classifyBookState(snap(0.9, 0.92), { settledAt: '2026-08-30 12:00:00' })
+  assert.equal(r.state, 'settlement-cleared')
+  assert.equal(r.sellable, false)
+  assert.match(r.reason, /已完结/)
+})
+
+test('买盘瞬时抽空识别为 bid-vacuum，不卖', () => {
+  // bid 掉到 0.18 而 ask 仍在 1.00 —— 最优买单被撤，下一档远在低位
+  const r = classifyBookState(snap(0.18, 1))
+  assert.equal(r.state, 'bid-vacuum')
+  assert.equal(r.sellable, false)
+  assert.match(r.reason, /买盘瞬时抽空/)
+})
+
+test('正常盘口判为可卖', () => {
+  const r = classifyBookState(snap(0.9, 0.92))
+  assert.equal(r.state, 'normal')
+  assert.equal(r.sellable, true)
+})
+
+test('真实下跌（买卖两边一起下来）不算抽空，可以卖', () => {
+  // ask 也跟着跌到 0.55，说明是真实共识下移，不是单边抽空
+  const r = classifyBookState(snap(0.5, 0.55))
+  assert.equal(r.state, 'normal')
+  assert.equal(r.sellable, true)
+})
+
+test('两边都无报价时不做判断', () => {
+  const r = classifyBookState(snap(null, null))
+  assert.equal(r.state, 'no-book')
+  assert.equal(r.sellable, false)
+})
+
+test('缺 ask 且 bid 归零同样按结算清盘处理', () => {
+  const r = classifyBookState(snap(0, null))
+  assert.equal(r.state, 'settlement-cleared')
+  assert.equal(r.sellable, false)
+})
+
+test('bid 归零但 ask 在中间价位：仍然不可卖（没有成交对手）', () => {
+  // 历史回放里 850 个 bid<=0.02 的帧有 609 个是这形态（如 bid=0/ask=0.87），
+  // 早先只判「ask 在 1.00 附近」会把它们当正常盘口放过去
+  const r = classifyBookState(snap(0, 0.87))
+  assert.equal(r.state, 'bid-vacuum')
+  assert.equal(r.sellable, false)
+  assert.match(r.reason, /买盘归零/)
+})
+
+test('抽空判定的 bid 阈值可调', () => {
+  // 默认 0.6 放过 0.7；提高到 0.75 就该拦住
+  assert.equal(classifyBookState(snap(0.7, 0.95)).state, 'normal')
+  assert.equal(classifyBookState(snap(0.7, 0.95), { vacuumBidFloor: 0.75 }).state, 'bid-vacuum')
 })

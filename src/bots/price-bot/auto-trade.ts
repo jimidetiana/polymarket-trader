@@ -166,3 +166,95 @@ export function evaluateBookQuality(
 
   return null
 }
+
+// ==================== 卖出前的盘口守卫 ====================
+
+/**
+ * 盘口状态。卖出决策必须先过这一层，光看 bestBid 会把三种完全不同的情况混成一种。
+ *
+ * - `normal`            买盘正常，卖单能按接近报价的价位成交
+ * - `settlement-cleared` 盘口撤空（结算后），bestBid 归 0 但这不是亏损
+ * - `bid-vacuum`        最优买单被瞬时抽走，下一档远在低位
+ * - `no-book`           两边都没有报价，无从判断
+ */
+export type BookState = 'normal' | 'settlement-cleared' | 'bid-vacuum' | 'no-book'
+
+export interface BookGuardResult {
+  state: BookState
+  /** 此刻能否按 bestBid 卖出而不至于把仓位贱卖 */
+  sellable: boolean
+  reason: string
+}
+
+/**
+ * 卖出前判断盘口是否可用。
+ *
+ * 为什么必须有这一层——实测数据里三件事：
+ *
+ * 1. **结算清盘会伪装成归零。** 从 >=0.88 跌到 <=0.60 的 30 段里有 5 段、
+ *    「跌破 0.60 后再没恢复」的 15 段里有 11 段，形态都是 `1.00 -> 0.00`：
+ *    前一帧价格还是 1.00，下一帧 bid=0 且 ask=1。那是赢了之后盘口撤空，
+ *    不是亏损。只看 bestBid 会把这些赢单送上卖出路径，在 0 附近抛掉。
+ *
+ * 2. **买盘瞬时抽空会伪装成暴跌。** 跌破 0.60 又恢复的 30 段里，36.7% 只有
+ *    单个采样点低于 0.60，33.3% 在 10 秒内就回来，低位停留时长 p25 只有 1 秒。
+ *    这些时刻 ask 仍在 0.93~1.00——盘口没清空，只是最优买单被撤、下一档远在低位。
+ *    此时市价卖真的会成交在那个价位。
+ *
+ * 3. 因此价格止损在这份数据上是净亏的（30 秒确认窗仍是误触发 14 次换 4 次真止损）。
+ *    这个函数不是止损，是任何自动卖出逻辑的前置条件：先确认「现在的 bid 是真的」。
+ *
+ * 判定顺序有讲究：settledAt 优先于价格形态，因为手动完结之后盘口读数一律不可信。
+ */
+export function classifyBookState(
+  snapshot: Pick<PriceSnapshot, 'bestBid' | 'bestAsk'>,
+  opts: { settledAt?: string | Date | null; vacuumBidFloor?: number } = {},
+): BookGuardResult {
+  const { bestBid, bestAsk } = snapshot
+
+  // 已完结/已结算：不管盘口显示什么都不该再按价格卖
+  if (opts.settledAt) {
+    return {
+      state: 'settlement-cleared',
+      sellable: false,
+      reason: '规则已完结，盘口读数不可信，不按价格卖出',
+    }
+  }
+
+  if (bestBid == null && bestAsk == null) {
+    return { state: 'no-book', sellable: false, reason: '买卖两边均无报价，无法判断' }
+  }
+
+  // 买盘归零：一律不可卖，先于其余判定。
+  //
+  // 没有买单就没有成交对手，ask 是多少都不影响这个结论。历史回放里
+  // 850 个 bid<=0.02 的帧中有 609 个 ask 落在 0.02~0.99 之间（如 bid=0/ask=0.87），
+  // 若只判「ask 在 1.00 附近」会把它们放过去，然后试图向空买盘挂卖单。
+  //
+  // 归零之后再按 ask 分因：停在天花板的是结算清盘（赢了之后撤单），
+  // 其余是买盘被抽干。两者都不可卖，但 reason 要能区分，否则排查时看不出差别。
+  const bidGone = bestBid == null || bestBid <= 0.02
+  if (bidGone) {
+    const askAtCeiling = bestAsk == null || bestAsk >= 0.99
+    return {
+      state: askAtCeiling ? 'settlement-cleared' : 'bid-vacuum',
+      sellable: false,
+      reason: askAtCeiling
+        ? `盘口已撤空（bid=${bestBid ?? 'null'} / ask=${bestAsk ?? 'null'}），疑似结算清盘，不是亏损`
+        : `买盘归零（bid=${bestBid ?? 'null'} / ask=${bestAsk?.toFixed(4) ?? 'null'}），无成交对手，不能卖`,
+    }
+  }
+
+  // 买盘抽空：bid 掉到低位而 ask 还在高位，价差宽到不可能是真实共识
+  const floor = opts.vacuumBidFloor ?? 0.6
+  if (bestBid != null && bestBid <= floor && bestAsk != null && bestAsk >= 0.9) {
+    return {
+      state: 'bid-vacuum',
+      sellable: false,
+      reason: `买盘瞬时抽空（bid=${bestBid.toFixed(4)} 而 ask=${bestAsk.toFixed(4)}），` +
+        '按此价卖出会大幅贱卖，应等买盘恢复',
+    }
+  }
+
+  return { state: 'normal', sellable: true, reason: '买盘正常' }
+}
