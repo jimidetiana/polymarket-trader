@@ -484,9 +484,26 @@ function extractTotalGoalLine(m: { question_en?: unknown; question_zh?: unknown;
   // 半场盘：兜 classifyMarketType 因词序而漏掉的写法
   if (/half|1st h|2nd h/.test(qEn) || qZh.includes('半场')) return null;
 
-  // 单队盘：全场大小球的问法是「这场比赛总进球数」，主语是比赛；
-  // 单队盘的主语是球队（"Will X score..." / "X to score over..."）。
-  // 用「是否出现 total goals / 双方合计」正面判定比枚举队名可靠。
+  // 单队盘：主语是某一队而不是整场比赛。平台上有两种写法。
+  //
+  // 1) 句子式："Will Arsenal score over 1.5 goals?"
+  // 2) 标题式（实际数据里占绝大多数）：
+  //      全场  "FK Liepaja vs. Riga FC: O/U 0.5"
+  //      单队  "FK Liepaja vs. Riga FC: FK Liepaja O/U 0.5"
+  //    两者的差别只在冒号后、O/U 之前是否还夹着一个队名。
+  //
+  // 早先只判了句子式，标题式的单队盘全部漏过去，导致一键批量创建
+  // 每场比赛建了 3 条规则（全场 + 主队 + 客队）而不是 1 条。
+  //
+  // 所以标题式改成正面判定：取最后一个冒号之后的部分，它必须以 O/U
+  // 或 Over/Under 开头才算全场盘。有队名夹在中间就不是。
+  const colonIdx = qEn.lastIndexOf(':');
+  if (colonIdx >= 0) {
+    const tail = qEn.slice(colonIdx + 1).trim();
+    // 冒号后有内容且不是以 o/u | over/under 开头 → 夹着队名，是单队盘
+    if (tail && !/^(o\/u|over\/under|total)\b/.test(tail)) return null;
+  }
+
   const isMatchTotal =
     /total\s+goals/.test(qEn) ||
     /combined/.test(qEn) ||
