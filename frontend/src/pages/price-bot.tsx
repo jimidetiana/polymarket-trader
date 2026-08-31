@@ -41,6 +41,7 @@ import {
   type GoalSurgeParams,
   type AutoTradeStatus,
   type AutoTradeParams,
+  type BuyOrderMode,
   type AutoOrderRecord,
 } from '@/lib/api'
 
@@ -455,7 +456,10 @@ export default function PriceBotPage() {
         `标准规模：${d?.baseSize ?? '?'} ${d?.sizeMode === 'usdc' ? 'USDC' : '份'}\n` +
         `单笔上限：${d?.maxSize ?? '?'} / 每盘口 ${d?.maxOrdersPerRule ?? '?'} 笔 / 每日 ${d?.maxOrdersPerDay ?? '?'} 笔\n` +
         `每日名义额上限：${d?.maxDailyNotional ?? '?'} USDC\n` +
-        `买入价区间：${d?.minBuyPrice ?? 0} ~ ${d?.maxBuyPrice ?? '?'}，价差上限 ${d?.maxSpread ?? 0}\n\n` +
+        `买入价区间：${d?.minBuyPrice ?? 0} ~ ${d?.maxBuyPrice ?? '?'}，价差上限 ${d?.maxSpread ?? 0}\n` +
+        (d?.buyOrderMode === 'maker'
+          ? `买入方式：挂单（bestBid + ${d?.makerTickOffset ?? 1} tick，等成交，约一半下不出去）\n\n`
+          : `买入方式：吃单（穿价，优先保成交）\n\n`) +
         `确认开启？`,
       )
       if (!ok) return
@@ -1412,11 +1416,18 @@ function AutoTradePanel({
       onDraftChange({ ...draft, sizeMode: v as 'shares' | 'usdc' })
       return
     }
+    if (k === 'buyOrderMode') {
+      onDraftChange({ ...draft, buyOrderMode: v as BuyOrderMode })
+      return
+    }
     // 空串保留为 undefined，让后端回退默认值，而不是被写成 0
     onDraftChange({ ...draft, [k]: v === '' ? undefined : Number(v) })
   }
 
   const unit = draft.sizeMode === 'shares' ? '份' : 'USDC'
+  // 草稿没填时按后端生效值显示，否则面板会在「未改动」和「默认 taker」之间说谎
+  const mode = draft.buyOrderMode ?? status?.defaults.buyOrderMode ?? 'taker'
+  const isMaker = mode === 'maker'
 
   return (
     <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
@@ -1440,10 +1451,20 @@ function AutoTradePanel({
         />
       </div>
 
-      <p className="mb-2 text-xs text-muted-foreground">
-        下单价以 <span className="font-mono">bestAsk + 穿价缓冲</span> 报价（吃单，优先保成交），
-        而非挂在 bestBid 上等成交。缓冲同时覆盖下单延迟内对手价的上移。
-      </p>
+      {isMaker ? (
+        <p className="mb-2 text-xs text-muted-foreground">
+          下单价以 <span className="font-mono">bestBid + N tick</span> 报价（挂单，压在
+          <span className="font-mono"> bestAsk - 1 tick</span> 以下保证不立即成交），穿价缓冲不生效。
+          每笔约省 <span className="font-mono">+0.08</span> 的入场价，代价是成交率从 95% 掉到 56%，
+          且没成交的那一半里藏着逆向选择——<span className="text-amber-600">没成交往往意味着方向对了</span>。
+          不会自动超时改吃单：任何时长都把价格优势还回去。
+        </p>
+      ) : (
+        <p className="mb-2 text-xs text-muted-foreground">
+          下单价以 <span className="font-mono">bestAsk + 穿价缓冲</span> 报价（吃单，优先保成交），
+          而非挂在 bestBid 上等成交。缓冲同时覆盖下单延迟内对手价的上移。
+        </p>
+      )}
 
       {/* 参数 */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -1465,10 +1486,38 @@ function AutoTradePanel({
           标准规模不够一手时会自动补到 5 份，但不会越过「单笔最大规模」——
           所以单笔上限至少要留出 5 × 限价（0.95 的盘口约 $4.75），否则一单也下不出去。
         </p>
-        <NumField label="穿价缓冲" value={draft.slippageBuffer} onChange={(v) => set('slippageBuffer', v)} step={0.01} />
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">买入方式</span>
+          <select
+            value={mode}
+            onChange={(e) => set('buyOrderMode', e.target.value)}
+            className="rounded-md border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="taker">吃单（穿价，保成交）</option>
+            <option value="maker">挂单（等成交，价更优）</option>
+          </select>
+        </label>
+        {isMaker ? (
+          <NumField
+            label="挂高几个 tick"
+            value={draft.makerTickOffset}
+            onChange={(v) => set('makerTickOffset', v)}
+            step={1}
+          />
+        ) : (
+          <NumField label="穿价缓冲" value={draft.slippageBuffer} onChange={(v) => set('slippageBuffer', v)} step={0.01} />
+        )}
         <NumField label="买入价上限" value={draft.maxBuyPrice} onChange={(v) => set('maxBuyPrice', v)} step={0.01} />
         <NumField label="买入价下限" value={draft.minBuyPrice} onChange={(v) => set('minBuyPrice', v)} step={0.05} />
         <NumField label="最大买卖价差" value={draft.maxSpread} onChange={(v) => set('maxSpread', v)} step={0.01} />
+        {isMaker && (
+          <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
+            挂高 1 个 tick 是自己占一档，排在队首，中位等待 67 秒；填 0 是并到 bestBid 上排队尾，
+            价格再优一点但中位等待 221 秒，且能不能成交取决于前面排了多少手。推荐 1。
+            规则「完结 / 停用 / 删除 / 停止监控」和机器人停机时，未成交的挂单会自动撤掉；
+            已成交的持仓不动，去留仍由人工判断。
+          </p>
+        )}
         <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
           买入价下限是防误买的关键：一个进球会把 0.5/1.5/2.5/3.5 各档一起抬起来，
           Over 3.5 从 0.05 涨到 0.09 涨幅同样过阈值，但这条线离结算还很远。

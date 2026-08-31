@@ -864,6 +864,8 @@ export interface AutoTradeParams {
   minBuyPrice?: number
   /** 最大可接受买卖价差，超过判薄盘不下单。0 = 不校验 */
   maxSpread?: number
+  /** 相对 bestBid 的最大溢价，限制穿价能让到多高。0 = 不校验 */
+  maxPremiumOverBid?: number
   /** 每盘口累计最多下单笔数 */
   maxOrdersPerRule?: number
   /** 全局每日最多下单笔数 */
@@ -872,7 +874,20 @@ export interface AutoTradeParams {
   maxDailyNotional?: number
   /** 价格 tick */
   tickSize?: number
+  /**
+   * 买入报价方式。taker = 穿价立即成交；maker = 挂在盘口上等成交。
+   *
+   * maker 每笔省 +0.0822（见 docs/price-bot-analysis.md 第 9.14 节），
+   * 代价是成交率从 94.8% 掉到 55.8%，且没成交的那一半里藏着逆向选择。
+   * 默认 taker。
+   */
+  buyOrderMode?: BuyOrderMode
+  /** maker 模式下报价高出 bestBid 几个 tick。1 = 自己占一档（推荐），0 = 并到 bid 排队尾 */
+  makerTickOffset?: number
 }
+
+/** 买入报价方式，见 AutoTradeParams.buyOrderMode */
+export type BuyOrderMode = 'taker' | 'maker'
 
 export type AutoOrderStatus = 'placed' | 'failed' | 'skipped' | 'simulated'
 
