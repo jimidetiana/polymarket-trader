@@ -718,6 +718,14 @@ export async function recordAutoOrder(
  * 只统计真正占用额度的状态（placed/simulated），skipped/failed 不计——
  * 被拦下或提交失败的没有实际敞口，不该消耗配额。
  *
+ * **撤单后不再占用配额。** `price_bot_orders.status` 只记录「提交成功」，
+ * 撤单走 soccer_orders.order_status，所以这里必须 join 过去排掉。
+ * 不排的话 maker 模式会被自己的挂单卡死：报价挂上→没成交→机会结束撤掉，
+ * 敞口是 0 但配额已经用掉，默认 maxOrdersPerRule=2 两次就把盘口锁死。
+ *
+ * 只排 `cancelled`（一份没成交）。`partial_cancelled` 有实际敞口，照算。
+ * LEFT JOIN 是必须的：simulated 单没有 trade_order_id，INNER JOIN 会把它们丢掉。
+ *
  * 计数走库而不是内存，这样重启不会把已用额度清零。
  * 「当日」按 UTC 自然日，与库里 DATETIME 的存储口径一致。
  */
@@ -729,12 +737,18 @@ export async function getAutoOrderCounts(ruleId: number): Promise<{
   await ensureTables()
   const [rows] = await pool.execute<any[]>(
     `SELECT
-       (SELECT COUNT(*) FROM price_bot_orders
-         WHERE rule_id = ? AND status IN ('placed','simulated')) AS rule_total,
-       (SELECT COUNT(*) FROM price_bot_orders
-         WHERE status IN ('placed','simulated') AND created_at >= UTC_DATE()) AS day_total,
-       (SELECT COALESCE(SUM(notional), 0) FROM price_bot_orders
-         WHERE status IN ('placed','simulated') AND created_at >= UTC_DATE()) AS day_notional`,
+       (SELECT COUNT(*) FROM price_bot_orders o
+          LEFT JOIN soccer_orders s ON s.id = o.trade_order_id
+         WHERE o.rule_id = ? AND o.status IN ('placed','simulated')
+           AND COALESCE(s.order_status, '') <> 'cancelled') AS rule_total,
+       (SELECT COUNT(*) FROM price_bot_orders o
+          LEFT JOIN soccer_orders s ON s.id = o.trade_order_id
+         WHERE o.status IN ('placed','simulated') AND o.created_at >= UTC_DATE()
+           AND COALESCE(s.order_status, '') <> 'cancelled') AS day_total,
+       (SELECT COALESCE(SUM(o.notional), 0) FROM price_bot_orders o
+          LEFT JOIN soccer_orders s ON s.id = o.trade_order_id
+         WHERE o.status IN ('placed','simulated') AND o.created_at >= UTC_DATE()
+           AND COALESCE(s.order_status, '') <> 'cancelled') AS day_notional`,
     [ruleId],
   )
   const r = rows[0] || {}
@@ -831,7 +845,13 @@ export async function listAutoOrders(options: {
   return { orders: rows.map(rowToAutoOrder), total }
 }
 
-/** 当日下单概览，给前端顶部展示已用额度 */
+/**
+ * 当日下单概览，给前端顶部展示已用额度。
+ *
+ * 撤单的排除口径必须与 getAutoOrderCounts 一致，否则面板显示的「今日剩余」
+ * 和闸门实际执行的额度会对不上——前端说还剩 3 笔，闸门认为已经用完。
+ * 见 getAutoOrderCounts 的注释。
+ */
 export async function getAutoOrderSummary(): Promise<{
   dayTotal: number
   dayNotional: number
@@ -842,13 +862,18 @@ export async function getAutoOrderSummary(): Promise<{
   await ensureTables()
   const [rows] = await pool.execute<any[]>(
     `SELECT
-       SUM(status IN ('placed','simulated') AND created_at >= UTC_DATE()) AS day_total,
-       COALESCE(SUM(CASE WHEN status IN ('placed','simulated')
-                          AND created_at >= UTC_DATE() THEN notional ELSE 0 END), 0) AS day_notional,
-       SUM(status IN ('placed','simulated')) AS placed,
-       SUM(status = 'failed') AS failed,
-       SUM(status = 'skipped') AS skipped
-     FROM price_bot_orders`,
+       SUM(o.status IN ('placed','simulated') AND o.created_at >= UTC_DATE()
+           AND COALESCE(s.order_status, '') <> 'cancelled') AS day_total,
+       COALESCE(SUM(CASE WHEN o.status IN ('placed','simulated')
+                          AND o.created_at >= UTC_DATE()
+                          AND COALESCE(s.order_status, '') <> 'cancelled'
+                         THEN o.notional ELSE 0 END), 0) AS day_notional,
+       SUM(o.status IN ('placed','simulated')
+           AND COALESCE(s.order_status, '') <> 'cancelled') AS placed,
+       SUM(o.status = 'failed') AS failed,
+       SUM(o.status = 'skipped') AS skipped
+     FROM price_bot_orders o
+     LEFT JOIN soccer_orders s ON s.id = o.trade_order_id`,
   )
   const r = rows[0] || {}
   return {
