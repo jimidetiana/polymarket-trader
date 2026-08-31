@@ -74,6 +74,7 @@ import {
   setRuleAutoTrade,
   setAutoTradeBatch,
   getConnectionState,
+  cancelRestingBuyOrders,
 } from '../bots/price-bot/price-bot.js';
 import { config } from '../config.js';
 
@@ -1738,6 +1739,10 @@ app.put('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {
   // 重新启用等于「这个盘口又要跑了」，待结算标记必须清掉，
   // 否则列表上会同时显示「监控中」和「待结算」两个矛盾的状态
   if (body.enabled === true) await markRuleSettled(id, false);
+  // 停用等于「这个盘口不跑了」。maker 模式下未成交的买单会一直挂在盘口上，
+  // 规则停了它还能成交——那笔成交没有任何策略依据。只撤未成交的挂单，
+  // 已成交的持仓不动（去留由人工判断）。
+  if (body.enabled === false) void cancelRestingBuyOrders(id, '规则停用');
   const rule = await getRule(id);
   res.json({ success: true, rule });
 }));
@@ -1746,6 +1751,10 @@ app.delete('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   // 先停止监控
   stopMonitor(id);
+  // 再撤未成交的买单，且必须在 deleteRule 之前：撤单要按 rule_id 查
+  // price_bot_orders，规则行删掉之后这些挂单就再也找不到了。这里 await，
+  // 不像停用那样后台跑，否则会和删除竞争。
+  await cancelRestingBuyOrders(id, '规则删除');
   const ok = await deleteRule(id);
   if (!ok) {
     res.status(404).json({ success: false, error: '规则不存在' });
@@ -1800,6 +1809,9 @@ app.post('/api/bots/price-bot/monitors/:ruleId/start', asyncHandler(async (req, 
 app.post('/api/bots/price-bot/monitors/:ruleId/stop', asyncHandler(async (req, res) => {
   const ruleId = Number(req.params.ruleId);
   stopMonitor(ruleId);
+  // 手动停监控和停用是同一件事：不再盯这个盘口了，挂在盘口上的未成交买单
+  // 也就没人管了。已成交的持仓不动。
+  void cancelRestingBuyOrders(ruleId, '手动停止监控');
   const monitor = getMonitor(ruleId);
   res.json({ success: true, monitor });
 }));

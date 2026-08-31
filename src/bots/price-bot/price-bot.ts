@@ -38,8 +38,9 @@ import {
   getAutoOrderCounts,
   listAutoOrders,
   getAutoOrderSummary,
+  listRestingBuyOrders,
 } from './db.js';
-import { placeOrder } from '../../soccer/trading.js';
+import { placeOrder, cancelOrder } from '../../soccer/trading.js';
 import {
   resolveAutoTradeParams,
   computeBuyLimitPrice,
@@ -1917,6 +1918,9 @@ export async function startBot(config?: Partial<PriceBotConfig>): Promise<void> 
 
 /** 停止机器人（停止所有监控） */
 export function stopBot(): void {
+  // 先把规则 id 收下来：下面 ruleCache.clear() 之后就查不到了，而撤单要按 rule_id 查
+  const stoppedRules = [...state.monitors.keys()]
+
   for (const [ruleId] of state.monitors) {
     const m = state.monitors.get(ruleId)
     if (m) {
@@ -1935,6 +1939,13 @@ export function stopBot(): void {
   connState.disconnectedAt = null
   connState.reconnectAttempts = 0
   connState.volatileUntil = null
+
+  // 机器人停了，挂单不会自己消失。maker 模式下未成交的买单还挂在盘口上，
+  // 没有监控的情况下成交是纯粹的裸风险。fire-and-forget：stopBot 是同步的，
+  // 不能因为撤单的网络往返把停机卡住。
+  for (const ruleId of stoppedRules) {
+    void cancelRestingBuyOrders(ruleId, '机器人停止')
+  }
 
   console.log('[PriceBot] 机器人已停止')
 }
@@ -2179,7 +2190,54 @@ export async function deleteRule(id: number): Promise<boolean> {
 export async function markRuleSettled(id: number, settled: boolean): Promise<boolean> {
   const ok = await dbMarkRuleSettled(id, settled)
   await refreshRuleCache(id)
+  // 标记完结时撤掉还挂着的买单。maker 模式下报价不穿价，单子会真留在盘口上；
+  // 结算后代币归零，有人拿废票砸我们的买价就是全额亏损。不 await，
+  // 避免撤单网络往返拖慢接口响应——撤不掉会打日志，且下次完结仍会重试。
+  if (ok && settled) void cancelRestingBuyOrders(id, '规则标记完结')
   return ok
+}
+
+/**
+ * 撤掉某规则下还挂在盘口的买单。
+ *
+ * 与人工止损无关：这里处理的是「单子还没成交但机会已经结束」，
+ * 不涉及任何「该不该继续持有」的判断。持仓的去留仍然全部交给人工。
+ *
+ * 不区分 buyOrderMode：taker 单也可能因为报价落后于 ask 而挂上，
+ * 只是 maker 模式下这个窗口从「百毫秒」变成「一直到成交或撤单」。
+ */
+export async function cancelRestingBuyOrders(
+  ruleId: number,
+  why: string,
+): Promise<{ cancelled: number; failed: number }> {
+  let cancelled = 0
+  let failed = 0
+  try {
+    const resting = await listRestingBuyOrders(ruleId)
+    if (resting.length === 0) return { cancelled: 0, failed: 0 }
+    console.log(`[PriceBot] rule=${ruleId} ${why}，撤销 ${resting.length} 笔挂着的买单`)
+    for (const o of resting) {
+      try {
+        const r = await cancelOrder(o.tradeOrderId)
+        if (r.success) {
+          cancelled++
+          console.log(
+            `[PriceBot] 已撤单 rule=${ruleId} order=${o.tradeOrderId} ` +
+            `${o.size}份 @ ${o.limitPrice.toFixed(4)}`,
+          )
+        } else {
+          failed++
+          console.warn(`[PriceBot] 撤单失败 rule=${ruleId} order=${o.tradeOrderId}: ${r.message}`)
+        }
+      } catch (err: any) {
+        failed++
+        console.error(`[PriceBot] 撤单异常 rule=${ruleId} order=${o.tradeOrderId}:`, err?.message)
+      }
+    }
+  } catch (err: any) {
+    console.error(`[PriceBot] 查询挂单失败 rule=${ruleId}:`, err?.message)
+  }
+  return { cancelled, failed }
 }
 
 /**

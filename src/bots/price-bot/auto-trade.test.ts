@@ -9,6 +9,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   alignPriceUp,
+  alignPriceDown,
   computeBuyLimitPrice,
   computeOrderSize,
   evaluateBookQuality,
@@ -331,4 +332,86 @@ test('抽空判定的 bid 阈值可调', () => {
   // 默认 0.6 放过 0.7；提高到 0.75 就该拦住
   assert.equal(classifyBookState(snap(0.7, 0.95)).state, 'normal')
   assert.equal(classifyBookState(snap(0.7, 0.95), { vacuumBidFloor: 0.75 }).state, 'bid-vacuum')
+})
+
+// ==================== maker 报价（第 9.14 节） ====================
+
+const MK = (over: Partial<AutoTradeParams> = {}) => P({ buyOrderMode: 'maker', ...over })
+
+test('alignPriceDown 向下对齐到 tick，且不留浮点尾巴', () => {
+  assert.equal(alignPriceDown(0.619, 0.01), 0.61)
+  assert.equal(alignPriceDown(0.61, 0.01), 0.61)
+  assert.equal(alignPriceDown(0.6119, 0.001), 0.611)
+  assert.equal(alignPriceDown(0.3, 0.01), 0.3)
+})
+
+test('maker 模式以 bestBid+1tick 报价，不碰 ask', () => {
+  const r = computeBuyLimitPrice(snap(0.85, 0.9), MK())
+  assert.ok(r)
+  assert.equal(r.price, 0.86)
+  assert.match(r.basis, /maker/)
+  // 关键性质：严格低于 ask，否则就是穿价单
+  assert.ok(r.price < 0.9)
+})
+
+test('maker 模式不使用 slippageBuffer（缓冲是穿价用的）', () => {
+  const a = computeBuyLimitPrice(snap(0.85, 0.9), MK({ slippageBuffer: 0.02 }))
+  const b = computeBuyLimitPrice(snap(0.85, 0.9), MK({ slippageBuffer: 0.2 }))
+  assert.equal(a?.price, b?.price)
+})
+
+test('makerTickOffset=0 即 join，挂在 bestBid 上', () => {
+  const r = computeBuyLimitPrice(snap(0.85, 0.9), MK({ makerTickOffset: 0 }))
+  assert.equal(r?.price, 0.85)
+  assert.match(r!.basis, /join/)
+})
+
+test('价差只有 1 tick 时 maker 报价降级为 join，不越过 ask', () => {
+  const r = computeBuyLimitPrice(snap(0.85, 0.86), MK({ makerTickOffset: 1 }))
+  assert.ok(r)
+  // bid+1tick = 0.86 = ask，会变成穿价；必须压回 0.85
+  assert.equal(r.price, 0.85)
+  assert.ok(r.price < 0.86)
+})
+
+test('大 offset 被 ask-1tick 压住，仍是挂单', () => {
+  const r = computeBuyLimitPrice(snap(0.8, 0.9), MK({ makerTickOffset: 20, maxPremiumOverBid: 0 }))
+  assert.ok(r)
+  assert.equal(r.price, 0.89)
+  assert.ok(r.price < 0.9)
+})
+
+test('maker 报价同样受 maxPremiumOverBid 约束', () => {
+  const r = computeBuyLimitPrice(snap(0.8, 0.95), MK({ makerTickOffset: 10, maxPremiumOverBid: 0.03 }))
+  assert.ok(r)
+  assert.equal(r.price, 0.83)
+})
+
+test('maker 模式缺 bid 时无法定价（没有买盘可作基准）', () => {
+  // taker 模式下缺 bid 仍能按 ask 定价，maker 不能
+  assert.equal(computeBuyLimitPrice(snap(null, 0.9), MK()), null)
+  assert.ok(computeBuyLimitPrice(snap(null, 0.9), P()))
+})
+
+test('maker 报价被压在 1 以下', () => {
+  const r = computeBuyLimitPrice(snap(0.99, null), MK({ maxPremiumOverBid: 0 }))
+  assert.ok(r)
+  assert.ok(r.price < 1)
+})
+
+test('无 ask 时 maker 仍按 bid+offset 报价（不必压 ask）', () => {
+  const r = computeBuyLimitPrice(snap(0.85, null), MK())
+  assert.equal(r?.price, 0.86)
+})
+
+test('价差闸门在 maker 模式下给出对应的原因文案', () => {
+  const wide = snap(0.7, 0.95)
+  assert.match(evaluateBookQuality(wide, P())!, /穿价买入会显著溢价/)
+  assert.match(evaluateBookQuality(wide, MK())!, /逆向选择最重/)
+})
+
+test('默认仍是 taker，改动交易语义的开关不默认打开', () => {
+  assert.equal(DEFAULT_AUTO_TRADE.buyOrderMode, 'taker')
+  const r = computeBuyLimitPrice(snap(0.6, 0.62), P())
+  assert.equal(r?.price, 0.64) // ask+缓冲，穿价
 })

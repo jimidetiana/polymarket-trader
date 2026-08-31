@@ -87,7 +87,43 @@ export interface AutoTradeParams {
   maxDailyNotional?: number
   /** 价格 tick，用于把限价对齐到合法档位 */
   tickSize?: number
+  /**
+   * 买入报价方式。
+   *
+   * - `taker`：按 bestAsk + 缓冲穿价，立刻成交。原有行为。
+   * - `maker`：按 bestBid + makerTickOffset 挂在盘口下方等成交，不穿价。
+   *
+   * 实测（第 9.14 节，77 个信号配对 bootstrap）：同一个盘口上挂单必然比穿价便宜，
+   * `bid+1tick` 报价平均省 **+0.0822/份**，95% 区间 [+0.0495, +0.1214]。
+   * 这是构造保证的价格优势——挂单一定付得更少。
+   *
+   * 但代价是逆向选择：挂单只在有人愿意卖到你的价位时成交，而那更多发生在
+   * 判断错的时候。挂单成交的那批盘口若改穿价值 −0.2157，比穿价整体 −0.1416
+   * 差 0.0741，恰好吃掉价格优势的九成，净剩 +0.008。
+   *
+   * **所以 maker 模式单独不会让策略转正**，它的价值在于把「少付的钱」变成
+   * 可支配的，而把「是否该留这个仓位」交给人工判断。配人工止损时才值得开。
+   *
+   * 另一个代价：成交率从 94.8% 降到 55.8%（等待中位 67s），44% 的信号不成交。
+   * 不成交不是亏损，但会漏掉直接涨走的赢单。不要为此加「超时转穿价」——
+   * 实测任何时长的回退都把每笔期望值拉回 −0.14~−0.17，等于把优势还回去。
+   */
+  buyOrderMode?: BuyOrderMode
+  /**
+   * maker 模式下高于 bestBid 的 tick 数。
+   *
+   * 1 = `bid+1tick`，自己开一个新价位、排在该价位队首。实测省 +0.0822。
+   * 0 = 挂在 bestBid 上（join），省得略多（+0.0870）但要排在已有买单队尾，
+   * 等待中位 221s（vs 67s），且回放模型忽略排队位置，真实成交率会明显低于
+   * 测出来的 48.1%。默认取 1。
+   *
+   * 报价始终被压在 bestAsk 之下至少一个 tick，避免变成穿价单。
+   */
+  makerTickOffset?: number
 }
+
+/** 买入报价方式，见 AutoTradeParams.buyOrderMode */
+export type BuyOrderMode = 'taker' | 'maker'
 
 export const DEFAULT_AUTO_TRADE: Required<AutoTradeParams> = {
   sizeMode: 'usdc',
@@ -107,6 +143,11 @@ export const DEFAULT_AUTO_TRADE: Required<AutoTradeParams> = {
   maxOrdersPerDay: 20,
   maxDailyNotional: 200,
   tickSize: 0.01,
+  // 默认保持原有的穿价行为：maker 模式虽然每份省 +0.0822，但成交率掉到 55.8%，
+  // 且需要人工判断接手逆向选择那一层（见 buyOrderMode 注释）。改动交易语义的
+  // 开关不应默认打开。
+  buyOrderMode: 'taker',
+  makerTickOffset: 1,
 }
 
 export interface PriceBotConfig {

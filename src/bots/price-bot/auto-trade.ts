@@ -47,13 +47,78 @@ export function alignPriceUp(price: number, tickSize: number): number {
 }
 
 /**
- * 计算买入限价。以成交率为首要目标，但不接受无上限的溢价。
+ * 把价格对齐到合法 tick，向下取整。
  *
- * 关键取舍：以 bestAsk 而非 bestBid 作基准。挂在 bestBid 上是 maker 单，
- * 要等别人来卖才成交；而进球瞬间价格正在快速上行，挂 bid 基本等于挂空。
- * 以 bestAsk + 缓冲 报价是 taker 单，直接吃掉现有卖单立即成交，
- * 多付的那点价差换来的是「拿得到货」。
+ * maker 报价用向下：向上对齐可能把报价顶到 bestAsk 上，那就从挂单变成了穿价单，
+ * 整个 maker 模式的前提就没了。宁可少报半个 tick 慢一点成交。
+ */
+export function alignPriceDown(price: number, tickSize: number): number {
+  if (!(tickSize > 0)) return price
+  // 加一个极小量，避免 0.62/0.01 在浮点下算成 61.99999999999999 而少退一个 tick
+  const ticks = Math.floor(price / tickSize + 1e-9)
+  const aligned = ticks * tickSize
+  const decimals = Math.max(0, Math.ceil(-Math.log10(tickSize)) + 1)
+  return Number(aligned.toFixed(decimals))
+}
+
+/**
+ * maker 报价：bestBid + makerTickOffset，且严格低于 bestAsk。
  *
+ * 三条约束，按优先级：
+ *  1. 不得 ≥ bestAsk —— 否则成了穿价单，maker 模式的前提消失
+ *  2. 不得 ≥ 1 —— placeOrder 会拒
+ *  3. 不得超过 bestBid + maxPremiumOverBid —— 与 taker 路径同一个闸门
+ *
+ * 价差只有 1 个 tick 时，offset≥1 会被压回 bestBid（即 join 报价）。
+ * 这是正确的降级：那种盘口已经没有可插入的价位了。
+ */
+function computeMakerBuyPrice(
+  snapshot: Pick<PriceSnapshot, 'bestBid' | 'bestAsk'>,
+  p: Required<AutoTradeParams>,
+): { price: number; basis: string } | null {
+  const { bestBid, bestAsk } = snapshot
+  const tick = p.tickSize > 0 ? p.tickSize : 0.01
+
+  // maker 报价必须有 bid 作基准。无 bid 意味着没有买盘可参照，
+  // 此时挂单等于凭空定价，不如放弃。
+  if (bestBid == null || !(bestBid > 0)) return null
+
+  const offset = Math.max(0, Math.floor(p.makerTickOffset))
+  let raw = bestBid + offset * tick
+  let basis = offset > 0
+    ? `bestBid(${bestBid.toFixed(4)})+${offset}tick[maker]`
+    : `bestBid(${bestBid.toFixed(4)})[maker/join]`
+
+  // 压在 ask 之下至少一个 tick：这是 maker 与 taker 的分界线
+  if (bestAsk != null && bestAsk > 0) {
+    const ceiling = bestAsk - tick
+    if (raw > ceiling) {
+      raw = Math.max(bestBid, ceiling)
+      basis += `→压到ask-1tick(${raw.toFixed(4)})`
+    }
+  }
+
+  const premiumCap = p.maxPremiumOverBid ?? 0
+  if (premiumCap > 0 && raw > bestBid + premiumCap) {
+    raw = bestBid + premiumCap
+    basis += `→压到bid+溢价上限(${premiumCap})`
+  }
+
+  // 向下对齐，避免对齐动作本身把报价推到 ask 上
+  const aligned = alignPriceDown(raw, tick)
+  // 对齐后仍要保证不低于 bid 之下（bid 本身就是合法档位，不会被磨掉）
+  const floored = Math.max(aligned, alignPriceDown(bestBid, tick))
+  const capped = Math.min(floored, 1 - tick)
+  const decimals = Math.max(0, Math.ceil(-Math.log10(tick)))
+  return { price: Number(capped.toFixed(decimals)), basis }
+}
+
+/**
+ * 计算买入限价。两种报价方式由 `buyOrderMode` 选择。
+ *
+ * ## taker（默认）
+ *
+ * 以 bestAsk + 缓冲 报价，直接吃掉现有卖单立即成交，多付的价差换「拿得到货」。
  * 缓冲同时覆盖决策到撮合之间（签名+网络，百毫秒级）ask 的继续上移。
  *
  * 但纯跟 ask 在宽价差盘口会失控：实测 486 次「限价0.9900 ≥ 上限0.97」中，
@@ -61,13 +126,25 @@ export function alignPriceUp(price: number, tickSize: number): number {
  * 赢了只赚 1%、错了归零，赔率极差。maxPremiumOverBid 把限价压回 bid 附近，
  * 代价是可能挂不上——挂不上远好过在 0.99 接盘。
  *
- * 返回 null 表示无法定价（ask 与 bid 均不可用）。
+ * ## maker
+ *
+ * 以 bestBid + makerTickOffset 报价，挂在盘口等成交，绝不穿价。
+ * 实测每份省 +0.0822（第 9.14 节），代价是成交率 94.8%→55.8%。
+ * 详见 `AutoTradeParams.buyOrderMode` 的注释。
+ *
+ * maker 模式下 slippageBuffer 不参与定价——缓冲的作用是穿价追 ask，
+ * 而 maker 的整个前提就是不追。maxPremiumOverBid 仍然生效但通常不触发，
+ * 因为溢价被 makerTickOffset 限得比它小得多。
+ *
+ * 返回 null 表示无法定价（ask 与 bid 均不可用；maker 模式下还要求 bid 可用）。
  */
 export function computeBuyLimitPrice(
   snapshot: Pick<PriceSnapshot, 'bestBid' | 'bestAsk'>,
   p: Required<AutoTradeParams>,
 ): { price: number; basis: string } | null {
   const buffer = Math.max(0, p.slippageBuffer)
+
+  if (p.buyOrderMode === 'maker') return computeMakerBuyPrice(snapshot, p)
 
   let raw: number
   let basis: string
@@ -160,7 +237,13 @@ export function evaluateBookQuality(
   if (maxSpread > 0 && bestBid != null && bestAsk != null && bestBid > 0) {
     const spread = bestAsk - bestBid
     if (spread > maxSpread) {
-      return `买卖价差${spread.toFixed(4)} > 上限${maxSpread}，盘口过薄，穿价买入会显著溢价`
+      // maker 模式不穿价，所以「按天价接货」这条理由不适用；但闸门照样保留：
+      // 宽价差本身标记薄盘，且第 9.12 节实测宽价差盘口正是挂单成交的那批
+      // （成交时价差中位 0.090），逆向选择最重。放宽它在 9.14 里没有量过，
+      // 所以不改行为，只把原因写准。
+      return p.buyOrderMode === 'maker'
+        ? `买卖价差${spread.toFixed(4)} > 上限${maxSpread}，盘口过薄，挂单在此类盘口逆向选择最重`
+        : `买卖价差${spread.toFixed(4)} > 上限${maxSpread}，盘口过薄，穿价买入会显著溢价`
     }
   }
 

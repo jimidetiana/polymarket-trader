@@ -745,6 +745,46 @@ export async function getAutoOrderCounts(ruleId: number): Promise<{
   }
 }
 
+/**
+ * 列出某规则下「还挂在盘口上」的买单。
+ *
+ * maker 模式（buyOrderMode='maker'）下报价不穿价，单子会真的留在盘口等成交。
+ * 若规则完结/结算时它还没成交，就必须撤掉——结算后代币归零，
+ * 有人拿废票来砸我们挂的买价就是全额亏损，且纯机械性、与人工止损判断无关。
+ *
+ * price_bot_orders.status 只记「是否提交成功」（placed/simulated），
+ * 真实成交状态在 soccer_orders.order_status，由 server 里 30 秒一次的
+ * runOrderSync 维护。所以判定「还挂着」必须 join 过去看 open/pending。
+ *
+ * 只返回带 trade_order_id 的记录：没有它就无法调 cancelOrder。
+ */
+export async function listRestingBuyOrders(ruleId: number): Promise<Array<{
+  autoOrderId: number
+  tradeOrderId: number
+  limitPrice: number
+  size: number
+}>> {
+  await ensureTables()
+  const [rows] = await pool.execute<any[]>(
+    `SELECT o.id, o.trade_order_id, o.limit_price, o.size
+       FROM price_bot_orders o
+       JOIN soccer_orders s ON s.id = o.trade_order_id
+      WHERE o.rule_id = ?
+        AND o.status = 'placed'
+        AND o.trade_order_id IS NOT NULL
+        AND s.side = 'BUY'
+        AND s.order_status IN ('open', 'pending')
+      ORDER BY o.id`,
+    [ruleId],
+  )
+  return rows.map((r: any) => ({
+    autoOrderId: Number(r.id),
+    tradeOrderId: Number(r.trade_order_id),
+    limitPrice: Number(r.limit_price),
+    size: Number(r.size),
+  }))
+}
+
 export async function listAutoOrders(options: {
   ruleId?: number
   status?: string
