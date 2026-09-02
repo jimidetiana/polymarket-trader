@@ -182,6 +182,9 @@ function runStateOf(rule: PriceMonitorRule, monitor?: PriceMonitorState | null):
 export default function PriceBotPage() {
   const [status, setStatus] = useState<PriceBotStatus | null>(null)
   const [rules, setRules] = useState<PriceMonitorRule[]>([])
+  // 后端报的规则总数。和 rules.length 不一致就说明被 limit 截了，要在界面上说出来
+  const [ruleTotal, setRuleTotal] = useState(0)
+  const [rulesError, setRulesError] = useState<string | null>(null)
   const [monitors, setMonitors] = useState<PriceMonitorState[]>([])
   const [selectedRuleId, setSelectedRuleId] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
@@ -211,12 +214,20 @@ export default function PriceBotPage() {
     }
   }, [])
 
+  // limit 取后端上限 1000。原来是 200，而规则数已经到 238——
+  // 超出的部分被静默截掉，且因为按开赛时间升序排，截掉的正是刚建的那批，
+  // 症状就是「手动建了机器人但列表里没有」。
+  // total 一并留下：真到 1000 上限时要能说出来，不能再默默丢。
   const loadRules = useCallback(async () => {
     try {
-      const { rules: r } = await fetchPriceBotRules({ limit: 200 })
+      const { rules: r, total } = await fetchPriceBotRules({ limit: 1000 })
       setRules(r)
-    } catch {
-      // ignore
+      setRuleTotal(total)
+      setRulesError(null)
+    } catch (err) {
+      // 这里原来是空 catch。列表拉不到时静默保留旧数据，
+      // 「没显示」和「请求失败」在界面上长得一模一样，排查全靠猜。
+      setRulesError(err instanceof Error ? err.message : '规则列表加载失败')
     }
   }, [])
 
@@ -760,6 +771,26 @@ export default function PriceBotPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-2">
+            {rulesError && (
+              <div
+                role="alert"
+                className="mb-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive"
+              >
+                规则列表加载失败：{rulesError}
+                <span className="block text-muted-foreground">下面显示的是上一次成功加载的内容，可能已过期。</span>
+              </div>
+            )}
+            {ruleTotal > rules.length && (
+              <div
+                role="alert"
+                className="mb-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700"
+              >
+                共 {ruleTotal} 个机器人，当前只显示 {rules.length} 个（已达单次加载上限）。
+                <span className="block text-muted-foreground">
+                  已完结的排在最后、优先被截断。请手动完结不再需要的机器人。
+                </span>
+              </div>
+            )}
             {rules.length === 0 ? (
               <div className="rounded-lg border border-border bg-card p-4 text-center">
                 <p className="text-sm text-muted-foreground">暂无机器人，点击「创建机器人」开始</p>

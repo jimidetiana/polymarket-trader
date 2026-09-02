@@ -308,6 +308,12 @@ export async function listRules(options: {
   const offset = Math.max(0, Math.floor(Number(options.offset ?? 0)))
   // LEFT JOIN 赛事/盘口，让左侧机器人列表能直接显示「主队 vs 客队」和盘口名。
   // 用 LEFT JOIN：赛事数据可能已被清理，规则本身仍要能列出来。
+  //
+  // 排序第一档是 `settled_at IS NOT NULL`——已完结的排最后。
+  // 这不是为了好看，是为了截断时先丢没用的：规则只增不减，早晚会超过 limit，
+  // 而按开赛时间升序排的话，被截掉的正好是「开赛最晚」＝刚建的那批，
+  // 于是新建的机器人在列表里直接消失。已完结的规则只是在等链上结算，
+  // 截掉它们没有任何操作后果，截掉在跑的有。
   const [rows] = await pool.execute<any[]>(
     `SELECT r.*,
             e.home_team_zh, e.away_team_zh,
@@ -318,7 +324,8 @@ export async function listRules(options: {
        LEFT JOIN soccer_events e ON e.id = r.event_id
        LEFT JOIN soccer_markets m ON m.id = r.market_id
      ${whereSql}
-     ORDER BY e.start_time IS NULL, e.start_time ASC, r.id DESC
+     ORDER BY r.settled_at IS NOT NULL,
+              e.start_time IS NULL, e.start_time ASC, r.id DESC
      LIMIT ${limit} OFFSET ${offset}`,
     params,
   )
