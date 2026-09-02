@@ -287,12 +287,21 @@ export async function insertOrder(params: {
   return result.insertId;
 }
 
+/**
+ * 订单列表。
+ *
+ * 带出 m.event_id 供前端跳到比赛管理对应盘口用（订单行上只有 market_id）。
+ *
+ * LEFT JOIN 而不是 INNER：赛事/盘口行被清理后，订单本身仍然要能看到。
+ * 用 INNER 的话这些订单会从订单管理里彻底消失——而它们可能还卡在 open，
+ * 既看不见又占着下单配额。清不掉的前提是先看得见。
+ */
 export async function getOrders(): Promise<unknown[]> {
   const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-    `SELECT o.*, m.question_zh, e.title_zh
+    `SELECT o.*, m.question_zh, m.event_id, e.title_zh
      FROM soccer_orders o
-     JOIN soccer_markets m ON m.id = o.market_id
-     JOIN soccer_events e ON e.id = m.event_id
+     LEFT JOIN soccer_markets m ON m.id = o.market_id
+     LEFT JOIN soccer_events e ON e.id = m.event_id
      ORDER BY o.created_at DESC`,
   );
   return rows;

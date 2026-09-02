@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { RefreshCw, Trophy, ChevronRight, AlertCircle, X, Star, ChevronDown, ChevronUp, Wallet, ListOrdered, XCircle, Trash2 } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { SdkOrderBookAdapter } from '@/components/sdk-order-book'
@@ -37,6 +38,11 @@ const FILTER_TABS: { key: FilterKey; label: (counts: Record<string, number>) => 
 ]
 
 export default function SoccerPage() {
+  // 深链：?eventId=...&marketId=... 从订单管理跳过来时直接定位到对应盘口
+  const [searchParams, setSearchParams] = useSearchParams()
+  const deepLinkApplied = useRef(false)
+  const [highlightMarketId, setHighlightMarketId] = useState<string | null>(null)
+
   const [events, setEvents] = useState<SoccerEvent[]>([])
   const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -129,6 +135,44 @@ export default function SoccerPage() {
     }, 30000)
     return () => clearInterval(timer)
   }, [])
+
+  // 深链定位：赛事列表到位后，把 URL 里指定的赛事选中、盘口高亮。
+  //
+  // 必须顺带把过滤切到「全部」：默认是「重点」（只含进行中/即将开始），
+  // 而从订单跳过来的赛事很可能已经结束——不切的话事件不在列表里，
+  // 用户看到的是一个空页面，比不跳更让人困惑。
+  //
+  // deepLinkApplied 保证只跑一次：之后用户自己切赛事/过滤不该被 URL 拽回来。
+  useEffect(() => {
+    if (deepLinkApplied.current) return
+    const eventId = searchParams.get('eventId')
+    const marketId = searchParams.get('marketId')
+    if (!eventId && !marketId) return
+    if (!events.length) return
+
+    const target = eventId ? events.find((e) => e.id === eventId) : null
+    if (eventId && !target) {
+      // 赛事已被清理，说明数据对不上了，明确告知而不是静默无反应
+      deepLinkApplied.current = true
+      setOrderMessage({ text: `未找到该订单对应的赛事（${eventId}），可能已被清理`, error: true })
+      setSearchParams({}, { replace: true })
+      return
+    }
+
+    deepLinkApplied.current = true
+    setFilter('all')
+    if (target) setSelectedEvent(target)
+    if (marketId) setHighlightMarketId(marketId)
+    // 参数用完即清，否则刷新页面会把用户又拽回这个盘口
+    setSearchParams({}, { replace: true })
+  }, [events, searchParams, setSearchParams])
+
+  // 高亮只是「帮你找到它」，不是持久状态，几秒后自动褪去
+  useEffect(() => {
+    if (!highlightMarketId) return
+    const t = setTimeout(() => setHighlightMarketId(null), 6000)
+    return () => clearTimeout(t)
+  }, [highlightMarketId])
 
   async function loadWallet() {
     try {
@@ -453,6 +497,7 @@ export default function SoccerPage() {
                     favoriteIds={favoriteIds}
                     collapsedTypes={collapsedTypes}
                     selectedEvent={selectedEvent}
+                    highlightMarketId={highlightMarketId}
                     onToggleFavorite={toggleFavorite}
                     onToggleCollapse={(type) =>
                       setCollapsedTypes((prev) => {
@@ -819,6 +864,7 @@ function MarketGroups({
   favoriteIds,
   collapsedTypes,
   selectedEvent,
+  highlightMarketId,
   onToggleFavorite,
   onToggleCollapse,
   onSelectOutcome,
@@ -829,6 +875,7 @@ function MarketGroups({
   favoriteIds: Set<string>
   collapsedTypes: Set<string>
   selectedEvent: SoccerEvent | null
+  highlightMarketId?: string | null
   onToggleFavorite: (marketId: string) => void
   onToggleCollapse: (type: string) => void
   onSelectOutcome: (event: SoccerEvent, market: SoccerMarket, idx: number) => void
@@ -849,6 +896,15 @@ function MarketGroups({
           livePrices={prices}
           selected={selected}
           isFavorite={favoriteIds.has(market.id)}
+          // 合并过的胜平负盘口 id 会变，所以也要比对 source_market_ids，
+          // 否则从订单跳过来时正好落在合并盘口上就高亮不到
+          highlighted={
+            highlightMarketId != null &&
+            (market.id === highlightMarketId ||
+              ((market as SoccerMarket & { source_market_ids?: string[] }).source_market_ids ?? []).includes(
+                highlightMarketId,
+              ))
+          }
           onSelectOutcome={(idx) =>
             selectedEvent && onSelectOutcome(selectedEvent, market, idx)
           }
@@ -914,17 +970,26 @@ function MarketCard({
   selected,
   isFavorite,
   onSelectOutcome,
+  highlighted = false,
   onToggleFavorite,
 }: {
   market: SoccerMarket
   livePrices: Record<string, { bid: number | null; ask: number | null }>
   selected: SelectedOutcome | null
   isFavorite: boolean
+  highlighted?: boolean
   onSelectOutcome: (idx: number) => void
   onToggleFavorite: () => void
 }) {
   const outcomes = Array.isArray(market.outcomes) ? market.outcomes : []
   const tokens = Array.isArray(market.clob_token_ids) ? market.clob_token_ids : []
+
+  // 从订单跳过来时把目标盘口滚进视野。盘口一屏放不下，光加边框用户看不见
+  const cardRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!highlighted) return
+    cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [highlighted])
 
   const gridClass =
     outcomes.length === 3
@@ -936,7 +1001,15 @@ function MarketCard({
           : 'grid-cols-2'
 
   return (
-    <div className="flex flex-col rounded-lg border border-border bg-card p-3">
+    <div
+      ref={cardRef}
+      className={cn(
+        'flex flex-col rounded-lg border bg-card p-3 transition-shadow',
+        highlighted
+          ? 'border-primary ring-2 ring-primary/40'
+          : 'border-border',
+      )}
+    >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium leading-snug text-foreground">

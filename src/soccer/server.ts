@@ -16,6 +16,7 @@ import {
   getMarketsForEvent,
   insertOrder,
   getOrders,
+  updateOrderStatus,
   pool,
 } from './db.js';
 import {
@@ -46,7 +47,7 @@ import {
   syncOnChainBalance,
   getPolymarketProfile,
 } from './wallet.js';
-import { placeOrder, cancelOrder, cancelAllOrders, syncOrderStatus, syncSettlements } from './trading.js';
+import { placeOrder, cancelOrder, cancelAllOrders, syncOrderStatus, syncSettlements, getOpenOrders } from './trading.js';
 import {
   startBot as startPriceBot,
   stopBot as stopPriceBot,
@@ -386,6 +387,176 @@ app.post('/api/soccer/orders/:id/cancel', asyncHandler(async (req, res) => {
     return;
   }
   res.json({ success: true, message: result.message });
+}));
+
+/**
+ * 挂单对账：把「本地以为挂着的」和「交易所真的挂着的」摆在一起。
+ *
+ * 为什么需要这个：本地 order_status 是 syncOrderStatus 维护的，而它在
+ * 「不在 open 列表 + 无成交记录 + getOrder 查不到」时会原样保留旧状态
+ * （trading.ts:606-626），于是一笔已经从交易所消失的单子会永远卡在 open。
+ * 这种残留在订单列表里和真挂单长得一模一样，点「取消」还会失败——
+ * 交易所根本不认识它。必须先分清，才谈得上处理。
+ *
+ * 三类：
+ *   live    本地有 + 交易所有 → 真挂单，可正常撤
+ *   stale   本地有 + 交易所无 → 残留记录，只能本地消除
+ *   orphan  交易所有 + 本地无 → 没登记的挂单，有真实敞口，要能撤
+ */
+app.get('/api/soccer/orders/reconcile', asyncHandler(async (_req, res) => {
+  const [localRows] = await pool.execute<any[]>(
+    `SELECT o.id, o.market_id, o.token_id, o.side, o.size, o.price,
+            o.order_status, o.memo, o.created_at,
+            m.question_zh, m.event_id, e.title_zh
+       FROM soccer_orders o
+       LEFT JOIN soccer_markets m ON m.id = o.market_id
+       LEFT JOIN soccer_events e ON e.id = m.event_id
+      WHERE o.order_status IN ('open', 'pending')
+      ORDER BY o.id DESC`,
+  );
+
+  // 交易所侧。拿不到就不猜：exchangeReachable=false 时前端不显示「残留」判定，
+  // 否则一次网络抖动会把所有真挂单标成残留，诱导用户把有敞口的单子消掉。
+  let exchangeOrders: any[] = [];
+  let exchangeReachable = true;
+  try {
+    const raw = await getOpenOrders();
+    exchangeOrders = Array.isArray(raw) ? raw : [];
+  } catch {
+    exchangeReachable = false;
+  }
+
+  const exchangeIds = new Set<string>();
+  for (const o of exchangeOrders) {
+    const oid = o?.id || o?.orderID || o?.order_id;
+    if (oid) exchangeIds.add(String(oid));
+  }
+
+  // clob id 存在 memo 里（口径同 trading.ts:558）
+  const clobIdOf = (memo: string | null): string | null =>
+    memo?.match(/订单ID:\s*(\S+)/)?.[1] ?? null;
+
+  const matchedClobIds = new Set<string>();
+  const items = localRows.map((r) => {
+    const clobOrderId = clobIdOf(r.memo);
+    if (clobOrderId) matchedClobIds.add(clobOrderId);
+    // 没有 clob id 说明这笔从没真正上链（模拟单 / 下单即失败），必然是残留
+    const onExchange = clobOrderId != null && exchangeIds.has(clobOrderId);
+    return {
+      id: r.id,
+      clobOrderId,
+      marketId: r.market_id,
+      eventId: r.event_id ?? null,
+      tokenId: r.token_id,
+      side: r.side,
+      size: Number(r.size),
+      price: Number(r.price),
+      status: r.order_status,
+      createdAt: r.created_at,
+      questionZh: r.question_zh ?? null,
+      titleZh: r.title_zh ?? null,
+      // 交易所不可达时一律按 unknown，不做残留判定
+      kind: !exchangeReachable ? 'unknown' : onExchange ? 'live' : 'stale',
+    };
+  });
+
+  const orphans = exchangeOrders
+    .filter((o) => {
+      const oid = String(o?.id || o?.orderID || o?.order_id || '');
+      return oid && !matchedClobIds.has(oid);
+    })
+    .map((o) => ({
+      clobOrderId: String(o?.id || o?.orderID || o?.order_id),
+      tokenId: o?.asset_id ?? o?.token_id ?? null,
+      side: o?.side ?? null,
+      price: o?.price != null ? Number(o.price) : null,
+      size: o?.original_size != null ? Number(o.original_size) : null,
+      sizeMatched: o?.size_matched != null ? Number(o.size_matched) : null,
+    }));
+
+  res.json({
+    success: true,
+    exchangeReachable,
+    exchangeCount: exchangeOrders.length,
+    items,
+    orphans,
+    counts: {
+      live: items.filter((i) => i.kind === 'live').length,
+      stale: items.filter((i) => i.kind === 'stale').length,
+      unknown: items.filter((i) => i.kind === 'unknown').length,
+      orphan: orphans.length,
+    },
+  });
+}));
+
+/**
+ * 手动消除残留记录：只改本地状态，不碰交易所。
+ *
+ * 和 /cancel 的区别：/cancel 会向交易所发撤单请求，对残留记录必然失败
+ * （交易所不认识这个 id），失败后本地状态也就一直留在 open。这个接口是
+ * 给「交易所已经没有、本地还挂着」的记录收尾用的。
+ *
+ * 落到 cancelled 而不是删除记录：cancelled 是有语义的终态（一份没成交），
+ * 下单配额的统计正是按它排除的（price-bot/db.ts getAutoOrderCounts），
+ * 删掉行反而会让历史对不上账。
+ *
+ * 安全约束：先自己查一遍交易所，确认这笔真的不在挂单列表里才动手。
+ * 只信前端传来的判定，等于把「撤掉有敞口的真挂单」的风险交给界面状态。
+ */
+app.post('/api/soccer/orders/:id/force-close', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) {
+    res.status(400).json({ success: false, error: '无效的订单 ID' });
+    return;
+  }
+
+  const [rows] = await pool.execute<any[]>(
+    `SELECT id, order_status, memo FROM soccer_orders WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  if (!rows.length) {
+    res.status(404).json({ success: false, error: '订单不存在' });
+    return;
+  }
+  const order = rows[0];
+  if (order.order_status !== 'open' && order.order_status !== 'pending') {
+    res.status(400).json({
+      success: false,
+      error: `只能消除 open/pending 的残留记录，当前状态：${order.order_status}`,
+    });
+    return;
+  }
+
+  const clobOrderId = order.memo?.match(/订单ID:\s*(\S+)/)?.[1] ?? null;
+  if (clobOrderId) {
+    // 有 clob id 就必须验证。交易所不可达时拒绝操作——
+    // 「查不到」不等于「不存在」，宁可让用户稍后重试。
+    let exchangeOrders: any[];
+    try {
+      const raw = await getOpenOrders();
+      exchangeOrders = Array.isArray(raw) ? raw : [];
+    } catch (err: any) {
+      res.status(503).json({
+        success: false,
+        error: `无法确认交易所挂单状态，已中止：${err?.message ?? err}`,
+      });
+      return;
+    }
+    const stillOpen = exchangeOrders.some((o) => {
+      const oid = String(o?.id || o?.orderID || o?.order_id || '');
+      return oid === clobOrderId;
+    });
+    if (stillOpen) {
+      res.status(409).json({
+        success: false,
+        error: '这笔挂单在交易所仍然存在，不是残留记录。请用「取消」走正常撤单。',
+      });
+      return;
+    }
+  }
+
+  await updateOrderStatus(id, 'cancelled', '手动消除残留记录（交易所已无此单）');
+  res.json({ success: true, message: `订单 #${id} 的残留记录已消除` });
 }));
 
 app.delete('/api/soccer/orders/:id', asyncHandler(async (req, res) => {

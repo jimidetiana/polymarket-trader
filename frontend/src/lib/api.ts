@@ -126,6 +126,63 @@ export async function syncOrders(): Promise<{ message: string; total: number; ma
   return data
 }
 
+// ---- 挂单对账 ----
+
+/**
+ * 一笔挂单的三种归属：
+ *   live    本地有 + 交易所有 → 真挂单，走正常撤单
+ *   stale   本地有 + 交易所无 → 残留记录，只能本地消除
+ *   unknown 交易所不可达 → 不做判定（避免网络抖动把真挂单标成残留）
+ */
+export type RestingOrderKind = 'live' | 'stale' | 'unknown'
+
+export interface RestingOrder {
+  id: number
+  clobOrderId: string | null
+  marketId: string
+  eventId: string | null
+  tokenId: string
+  side: 'BUY' | 'SELL'
+  size: number
+  price: number
+  status: string
+  createdAt: string
+  questionZh: string | null
+  titleZh: string | null
+  kind: RestingOrderKind
+}
+
+/** 交易所有、本地没登记的挂单。有真实敞口 */
+export interface OrphanOrder {
+  clobOrderId: string
+  tokenId: string | null
+  side: string | null
+  price: number | null
+  size: number | null
+  sizeMatched: number | null
+}
+
+export interface ReconcileResult {
+  exchangeReachable: boolean
+  exchangeCount: number
+  items: RestingOrder[]
+  orphans: OrphanOrder[]
+  counts: { live: number; stale: number; unknown: number; orphan: number }
+}
+
+export async function fetchOrderReconcile(): Promise<ReconcileResult> {
+  return await request<ReconcileResult>('/api/soccer/orders/reconcile')
+}
+
+/** 消除残留记录（只改本地状态，后端会自己再验一遍交易所） */
+export async function forceCloseOrder(orderId: number): Promise<string> {
+  const data = await request<{ message: string }>(
+    `/api/soccer/orders/${orderId}/force-close`,
+    { method: 'POST' },
+  )
+  return data.message
+}
+
 // ---- Translations ----
 
 export async function fetchTranslations(): Promise<SoccerEvent[]> {

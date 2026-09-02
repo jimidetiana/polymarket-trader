@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import {
   RefreshCw, Wallet, TrendingUp, TrendingDown, ShoppingCart,
   X, CheckCircle2, Clock, XCircle, AlertCircle, Zap,
   Trash2, ListOrdered, ArrowDownToLine, ArrowUpFromLine,
+  ExternalLink, Eraser, Layers, ShieldAlert,
 } from 'lucide-react'
 import { Layout } from '@/components/layout'
 import { cn, formatTime, formatPercent, formatUsdc, formatNumber } from '@/lib/utils'
 import {
   fetchOrders, fetchPositions, quickSell, syncOrders,
-  cancelOrder, type Position,
+  cancelOrder, fetchOrderReconcile, forceCloseOrder,
+  type Position, type ReconcileResult,
 } from '@/lib/api'
 
-type TabKey = 'positions' | 'history'
+type TabKey = 'positions' | 'history' | 'resting'
 type OrderFilter = 'all' | 'filled' | 'open' | 'settled' | 'cancelled' | 'failed'
 
 const FILTER_TABS: { key: OrderFilter; label: string }[] = [
@@ -28,9 +31,12 @@ export default function OrdersPage() {
   const [positions, setPositions] = useState<Position[]>([])
   const [orders, setOrders] = useState<any[]>([])
   const [filter, setFilter] = useState<OrderFilter>('all')
-  const [sellTarget, setSellTarget] = useState<Position | null>(null)
+  // 卖出弹窗。mode 决定默认走市价还是限价，价格两种模式都可改
+  const [sellTarget, setSellTarget] = useState<{ pos: Position; mode: 'market' | 'limit' } | null>(null)
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null)
   const [syncing, setSyncing] = useState(false)
+  const [reconcile, setReconcile] = useState<ReconcileResult | null>(null)
+  const [reconcileBusy, setReconcileBusy] = useState(false)
 
   const loadData = useCallback(async () => {
     try {
@@ -42,11 +48,32 @@ export default function OrdersPage() {
     }
   }, [])
 
+  // 挂单对账要打交易所，比本地查询慢得多，所以单独拉、单独转圈，
+  // 不塞进 30s 的 loadData 里拖慢整页
+  const loadReconcile = useCallback(async () => {
+    setReconcileBusy(true)
+    try {
+      setReconcile(await fetchOrderReconcile())
+    } catch (err) {
+      setMessage({ text: `挂单对账失败：${err instanceof Error ? err.message : String(err)}`, error: true })
+    } finally {
+      setReconcileBusy(false)
+    }
+  }, [])
+
   useEffect(() => {
     loadData()
     const timer = setInterval(loadData, 30000)
     return () => clearInterval(timer)
   }, [loadData])
+
+  // 进「挂单管理」才拉对账，且只在没数据时自动拉一次。
+  // 这个请求要打交易所，不适合跟着轮询跑；后续刷新交给页内按钮。
+  useEffect(() => {
+    if (tab !== 'resting') return
+    if (reconcile || reconcileBusy) return
+    void loadReconcile()
+  }, [tab, reconcile, reconcileBusy, loadReconcile])
 
   async function handleSync() {
     setSyncing(true)
@@ -63,19 +90,42 @@ export default function OrdersPage() {
     }
   }
 
-  async function handleQuickSell(pos: Position) {
+  // 快速卖出改成开弹窗，而不是直接 confirm 后按当前买价打出去。
+  // 原来价格是写死的 current_bid，没有插手的机会：盘口一薄，
+  // 「按买价卖出」和「按你以为的价格卖出」可以差很远。
+  // 现在预填买价、可改，想原样确认也只多一次点击。
+  function handleQuickSell(pos: Position) {
     if (!pos.current_bid || pos.current_bid <= 0) {
       setMessage({ text: '无法获取当前买价，请稍后重试', error: true })
       return
     }
-    const income = (pos.current_bid * pos.net_size).toFixed(2)
-    if (!confirm(`确认以 ${formatPercent(pos.current_bid)} 的买价卖出 ${pos.net_size} 份 ${pos.outcome_name}？\n预计收入: $${income}`)) return
+    setSellTarget({ pos, mode: 'market' })
+  }
+
+  async function handleForceClose(orderId: number) {
+    if (!confirm(
+      `确定消除订单 #${orderId} 的残留记录吗？\n\n` +
+      '这只改本地状态（标记为已取消），不会向交易所发撤单请求。\n' +
+      '仅用于「交易所已经没有、本地还显示挂单中」的记录。\n' +
+      '后端会再次核对交易所，若这笔仍然挂着会拒绝操作。',
+    )) return
     try {
-      const result = await quickSell(pos.token_id, pos.net_size, pos.current_bid, 'market')
-      setMessage({ text: result.message, error: false })
-      await loadData()
+      const msg = await forceCloseOrder(orderId)
+      setMessage({ text: msg, error: false })
+      await Promise.all([loadData(), loadReconcile()])
     } catch (err) {
-      setMessage({ text: `卖出失败：${err instanceof Error ? err.message : String(err)}`, error: true })
+      setMessage({ text: `消除失败：${err instanceof Error ? err.message : String(err)}`, error: true })
+    }
+  }
+
+  async function handleCancelResting(orderId: number) {
+    if (!confirm(`确定向交易所撤销挂单 #${orderId} 吗？`)) return
+    try {
+      const msg = await cancelOrder(orderId)
+      setMessage({ text: msg, error: false })
+      await Promise.all([loadData(), loadReconcile()])
+    } catch (err) {
+      setMessage({ text: `撤单失败：${err instanceof Error ? err.message : String(err)}`, error: true })
     }
   }
 
@@ -118,7 +168,7 @@ export default function OrdersPage() {
   return (
     <Layout
       title="订单管理"
-      subtitle="持仓一览与订单记录，支持快速卖出未结算持仓"
+      subtitle="持仓、订单记录与挂单对账，可自定义价格卖出、清理残留挂单"
       actions={
         <button
           type="button"
@@ -190,11 +240,32 @@ export default function OrdersPage() {
               <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{orders.length}</span>
             )}
           </button>
+          <button
+            type="button"
+            onClick={() => setTab('resting')}
+            className={cn(
+              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-colors',
+              tab === 'resting' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            <Layers className="h-3.5 w-3.5" />
+            挂单管理
+            {/* 残留数单独用警示色标出来：这一栏的重点就是「有几笔对不上账」 */}
+            {reconcile && reconcile.counts.stale + reconcile.counts.orphan > 0 && (
+              <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">
+                {reconcile.counts.stale + reconcile.counts.orphan}
+              </span>
+            )}
+          </button>
         </div>
 
         {tab === 'positions' ? (
-          <PositionsList positions={positions} onQuickSell={handleQuickSell} onCustomSell={setSellTarget} />
-        ) : (
+          <PositionsList
+            positions={positions}
+            onQuickSell={handleQuickSell}
+            onCustomSell={(pos) => setSellTarget({ pos, mode: 'limit' })}
+          />
+        ) : tab === 'history' ? (
           <div className="space-y-3">
             <div className="flex flex-wrap gap-1.5">
               {FILTER_TABS.map((f) => (
@@ -215,12 +286,21 @@ export default function OrdersPage() {
             </div>
             <OrdersTable orders={filteredOrders} onCancel={handleCancelOrder} onDelete={handleDeleteOrder} />
           </div>
+        ) : (
+          <RestingOrdersPanel
+            data={reconcile}
+            busy={reconcileBusy}
+            onRefresh={loadReconcile}
+            onCancel={handleCancelResting}
+            onForceClose={handleForceClose}
+          />
         )}
       </div>
 
       {sellTarget && (
         <SellModal
-          position={sellTarget}
+          position={sellTarget.pos}
+          initialMode={sellTarget.mode}
           onClose={() => setSellTarget(null)}
           onSuccess={async (msg) => {
             setMessage({ text: msg, error: false })
@@ -362,15 +442,18 @@ function PositionsList({
 
 function SellModal({
   position,
+  initialMode = 'limit',
   onClose,
   onSuccess,
   onError,
 }: {
   position: Position
+  initialMode?: 'market' | 'limit'
   onClose: () => void
   onSuccess: (msg: string) => void
   onError: (msg: string) => void
 }) {
+  const [mode, setMode] = useState<'market' | 'limit'>(initialMode)
   const [size, setSize] = useState(String(position.net_size))
   const [price, setPrice] = useState(position.current_bid ? String((position.current_bid * 100).toFixed(1)) : '50')
   const [submitting, setSubmitting] = useState(false)
@@ -378,6 +461,18 @@ function SellModal({
   const sellSize = Number(size) || 0
   const sellPrice = Number(price) / 100 || 0
   const estimatedIncome = sellSize * sellPrice
+
+  // 报价快捷键。手敲百分数容易点错一位，而卖出是不可撤的
+  const bid = position.current_bid || 0
+  const ask = position.current_ask || 0
+  const presets: { label: string; value: number; hint: string }[] = [
+    { label: '买价', value: bid, hint: '挂在当前买价，最容易马上成交' },
+    { label: '买价 -1¢', value: bid - 0.01, hint: '让出 1 分钱换成交概率' },
+    ...(bid > 0 && ask > 0
+      ? [{ label: '中间价', value: (bid + ask) / 2, hint: '买卖价中点，等对手方过来' }]
+      : []),
+    ...(ask > 0 ? [{ label: '卖价', value: ask, hint: '挂在卖价，价格最优但要等' }] : []),
+  ].filter((p) => p.value > 0 && p.value < 1)
 
   async function handleSubmit() {
     if (sellSize <= 0 || sellPrice <= 0 || sellPrice >= 1) {
@@ -390,7 +485,7 @@ function SellModal({
     }
     setSubmitting(true)
     try {
-      const result = await quickSell(position.token_id, sellSize, sellPrice, 'limit')
+      const result = await quickSell(position.token_id, sellSize, sellPrice, mode)
       onSuccess(result.message)
     } catch (err) {
       onError(`卖出失败：${err instanceof Error ? err.message : String(err)}`)
@@ -406,10 +501,31 @@ function SellModal({
     >
       <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl">
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-foreground">限价卖出</h3>
+          <h3 className="text-sm font-semibold text-foreground">卖出持仓</h3>
           <button type="button" onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted">
             <X className="h-4 w-4" />
           </button>
+        </div>
+
+        {/* 市价 / 限价：两种都能改价格，区别只在吃单还是挂着等 */}
+        <div className="mb-4 flex gap-1 rounded-lg border border-border bg-muted/30 p-1">
+          {([
+            { key: 'market' as const, label: '市价卖出', hint: '按填写的价格直接吃对手方买单，求成交' },
+            { key: 'limit' as const, label: '限价挂单', hint: '挂在盘口等人来买，价格更优但可能不成交' },
+          ]).map((m) => (
+            <button
+              key={m.key}
+              type="button"
+              onClick={() => setMode(m.key)}
+              title={m.hint}
+              className={cn(
+                'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                mode === m.key ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              {m.label}
+            </button>
+          ))}
         </div>
 
         <div className="mb-4 rounded-lg border border-border bg-background p-3">
@@ -422,8 +538,16 @@ function SellModal({
             <span className="font-bold text-foreground">{position.net_size} 份</span>
           </div>
           <div className="mt-1 flex items-center justify-between text-xs">
-            <span className="text-muted-foreground">当前买价</span>
-            <span className="font-medium text-error">{formatPercent(position.current_bid)}</span>
+            <span className="text-muted-foreground">买价 / 卖价</span>
+            <span className="font-medium">
+              <span className="text-error">{formatPercent(position.current_bid)}</span>
+              <span className="text-muted-foreground"> / </span>
+              <span className="text-success">{formatPercent(position.current_ask)}</span>
+            </span>
+          </div>
+          <div className="mt-1 flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">买入均价</span>
+            <span className="font-medium text-foreground">{formatPercent(position.avg_buy_price)}</span>
           </div>
         </div>
 
@@ -457,21 +581,51 @@ function SellModal({
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">%</span>
             </div>
-            {position.current_bid > 0 && (
-              <button
-                type="button"
-                onClick={() => setPrice(String((position.current_bid * 100).toFixed(1)))}
-                className="mt-1 rounded bg-muted px-2 py-0.5 text-[10px] text-foreground hover:bg-muted/70"
-              >
-                对齐买价 {formatPercent(position.current_bid)}
-              </button>
+            {presets.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {presets.map((p) => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    title={p.hint}
+                    onClick={() => setPrice((p.value * 100).toFixed(1))}
+                    className="rounded bg-muted px-2 py-0.5 text-[10px] text-foreground hover:bg-muted/70"
+                  >
+                    {p.label} {formatPercent(p.value)}
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
-          <span className="text-[10px] text-muted-foreground">预计收入</span>
-          <span className="text-sm font-bold text-primary">${formatUsdc(estimatedIncome)}</span>
+        <div className="mt-4 space-y-2">
+          <div className="flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+            <span className="text-[10px] text-muted-foreground">预计收入</span>
+            <span className="text-sm font-bold text-primary">${formatUsdc(estimatedIncome)}</span>
+          </div>
+          {/* 盈亏用买入均价现算：卖出前最该知道的就是这一笔到底赚没赚 */}
+          {position.avg_buy_price > 0 && sellSize > 0 && sellPrice > 0 && (
+            <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
+              <span className="text-[10px] text-muted-foreground">
+                相对买入均价 {formatPercent(position.avg_buy_price)}
+              </span>
+              <span
+                className={cn(
+                  'text-xs font-bold',
+                  sellPrice >= position.avg_buy_price ? 'text-success' : 'text-error',
+                )}
+              >
+                {sellPrice >= position.avg_buy_price ? '+' : ''}
+                ${formatUsdc((sellPrice - position.avg_buy_price) * sellSize)}
+              </span>
+            </div>
+          )}
+          {mode === 'market' && sellPrice > 0 && bid > 0 && sellPrice > bid && (
+            <p className="text-[10px] text-warning">
+              填的价格高于当前买价 {formatPercent(bid)}，市价单可能吃不到，会退化成挂单等成交。
+            </p>
+          )}
         </div>
 
         <div className="mt-4 flex gap-2">
@@ -488,9 +642,272 @@ function SellModal({
             disabled={submitting}
             className="flex-1 rounded-md bg-error px-3 py-2 text-xs font-medium text-white hover:bg-error/90 disabled:opacity-60"
           >
-            {submitting ? '提交中...' : '确认卖出'}
+            {submitting
+              ? '提交中...'
+              : `确认${mode === 'market' ? '卖出' : '挂单'} ${formatNumber(sellSize)} 份 @ ${formatPercent(sellPrice)}`}
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 挂单管理：把「本地以为挂着的」和「交易所真的挂着的」对起来。
+ *
+ * 三类分开处理，因为处理方式完全不同：
+ *   live   真挂单 → 撤单（走交易所）
+ *   stale  残留记录 → 消除（只改本地，交易所根本不认识它）
+ *   orphan 交易所有、本地没登记 → 有真实敞口，必须让用户知道
+ */
+function RestingOrdersPanel({
+  data,
+  busy,
+  onRefresh,
+  onCancel,
+  onForceClose,
+}: {
+  data: ReconcileResult | null
+  busy: boolean
+  onRefresh: () => void
+  onCancel: (id: number) => void
+  onForceClose: (id: number) => void
+}) {
+  if (!data) {
+    return (
+      <div className="rounded-lg border border-border bg-card p-12 text-center text-xs text-muted-foreground">
+        {busy ? '正在与交易所对账...' : '暂无数据'}
+      </div>
+    )
+  }
+
+  const { items, orphans, counts, exchangeReachable, exchangeCount } = data
+  const live = items.filter((i) => i.kind === 'live')
+  const stale = items.filter((i) => i.kind === 'stale')
+  const unknown = items.filter((i) => i.kind === 'unknown')
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card p-3">
+        <div className="flex flex-wrap items-center gap-3 text-[10px]">
+          <span className="text-muted-foreground">
+            本地挂单中 <span className="font-bold text-foreground">{items.length}</span>
+          </span>
+          <span className="text-muted-foreground">
+            交易所实际 <span className="font-bold text-foreground">{exchangeCount}</span>
+          </span>
+          <span className="text-success">正常 {counts.live}</span>
+          <span className={counts.stale > 0 ? 'text-warning' : 'text-muted-foreground'}>
+            残留 {counts.stale}
+          </span>
+          <span className={counts.orphan > 0 ? 'text-error' : 'text-muted-foreground'}>
+            未登记 {counts.orphan}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-[10px] font-medium text-foreground hover:bg-muted disabled:opacity-60"
+        >
+          <RefreshCw className={cn('h-3 w-3', busy && 'animate-spin')} />
+          重新对账
+        </button>
+      </div>
+
+      {!exchangeReachable && (
+        <div className="flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[10px] text-warning">
+          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            连不上交易所，无法判断哪些是残留记录，下面一律按「未确认」显示。
+            这时不提供「消除」——查不到不等于不存在，误消除会把真有敞口的挂单从账上抹掉。
+          </span>
+        </div>
+      )}
+
+      {orphans.length > 0 && (
+        <div className="rounded-lg border border-error/40 bg-error/5 p-3">
+          <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-error">
+            <ShieldAlert className="h-3.5 w-3.5" />
+            交易所有 {orphans.length} 笔挂单，本地没有记录
+          </p>
+          <p className="mb-2 text-[10px] text-muted-foreground">
+            这些挂单有真实敞口，但本地库里查不到对应订单，说明下单记录丢了或是别处下的。
+            成交后不会有任何策略跟进。建议用「同步订单」把它们导入，或直接去 Polymarket 撤掉。
+          </p>
+          <div className="space-y-1">
+            {orphans.map((o) => (
+              <div
+                key={o.clobOrderId}
+                className="flex flex-wrap items-center gap-2 rounded border border-border bg-background px-2 py-1 font-mono text-[10px]"
+              >
+                <span className="text-muted-foreground">{o.clobOrderId.slice(0, 18)}...</span>
+                {o.side && <span className="text-foreground">{o.side}</span>}
+                {o.price != null && <span className="text-foreground">@{o.price}</span>}
+                {o.size != null && (
+                  <span className="text-muted-foreground">
+                    {o.sizeMatched ?? 0}/{o.size}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {stale.length > 0 && (
+        <RestingGroup
+          tone="warning"
+          title={`残留记录 ${stale.length} 笔`}
+          desc="本地显示挂单中，但交易所已经没有这笔。它们不会再成交，却仍占着每盘口的下单配额，也让持仓看起来对不上账。「消除」只改本地状态为已取消，不向交易所发请求。"
+          orders={stale}
+          action="forceClose"
+          onCancel={onCancel}
+          onForceClose={onForceClose}
+        />
+      )}
+
+      {live.length > 0 && (
+        <RestingGroup
+          tone="normal"
+          title={`正常挂单 ${live.length} 笔`}
+          desc="交易所确认仍在挂着，等待成交。撤单会真的向交易所发请求。"
+          orders={live}
+          action="cancel"
+          onCancel={onCancel}
+          onForceClose={onForceClose}
+        />
+      )}
+
+      {unknown.length > 0 && (
+        <RestingGroup
+          tone="warning"
+          title={`未确认 ${unknown.length} 笔`}
+          desc="交易所不可达，无法判断这些是真挂单还是残留。恢复连接后重新对账。"
+          orders={unknown}
+          action="none"
+          onCancel={onCancel}
+          onForceClose={onForceClose}
+        />
+      )}
+
+      {items.length === 0 && orphans.length === 0 && (
+        <div className="rounded-lg border border-border bg-card p-12 text-center text-xs text-muted-foreground">
+          没有挂单，本地与交易所一致。
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RestingGroup({
+  tone,
+  title,
+  desc,
+  orders,
+  action,
+  onCancel,
+  onForceClose,
+}: {
+  tone: 'normal' | 'warning'
+  title: string
+  desc: string
+  orders: ReconcileResult['items']
+  action: 'cancel' | 'forceClose' | 'none'
+  onCancel: (id: number) => void
+  onForceClose: (id: number) => void
+}) {
+  return (
+    <div
+      className={cn(
+        'rounded-lg border p-3',
+        tone === 'warning' ? 'border-warning/40 bg-warning/5' : 'border-border bg-card',
+      )}
+    >
+      <p className={cn('text-xs font-semibold', tone === 'warning' ? 'text-warning' : 'text-foreground')}>
+        {title}
+      </p>
+      <p className="mb-2 mt-0.5 text-[10px] text-muted-foreground">{desc}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead className="text-muted-foreground">
+            <tr>
+              <th className="px-2 py-1 font-medium">#</th>
+              <th className="px-2 py-1 font-medium">时间</th>
+              <th className="px-2 py-1 font-medium">盘口</th>
+              <th className="px-2 py-1 text-center font-medium">方向</th>
+              <th className="px-2 py-1 text-right font-medium">数量</th>
+              <th className="px-2 py-1 text-right font-medium">价格</th>
+              <th className="px-2 py-1 text-right font-medium">操作</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {orders.map((o) => (
+              <tr key={o.id}>
+                <td className="px-2 py-1.5 font-mono text-[10px] text-muted-foreground">{o.id}</td>
+                <td className="whitespace-nowrap px-2 py-1.5 text-[10px] text-muted-foreground">
+                  {formatTime(o.createdAt)}
+                </td>
+                <td className="px-2 py-1.5">
+                  {o.marketId ? (
+                    <Link
+                      to={`/soccer?${new URLSearchParams({
+                        ...(o.eventId ? { eventId: o.eventId } : {}),
+                        marketId: o.marketId,
+                      })}`}
+                      title="在比赛管理中查看该盘口"
+                      className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline"
+                    >
+                      {o.questionZh || '查看盘口'}
+                      <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                    </Link>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground">-</span>
+                  )}
+                  {o.titleZh && (
+                    <span className="block truncate text-[9px] text-muted-foreground">{o.titleZh}</span>
+                  )}
+                </td>
+                <td className="px-2 py-1.5 text-center">
+                  <span
+                    className={cn(
+                      'rounded px-1.5 py-0.5 text-[10px] font-medium',
+                      o.side === 'BUY' ? 'bg-success/10 text-success' : 'bg-error/10 text-error',
+                    )}
+                  >
+                    {o.side === 'BUY' ? '买入' : '卖出'}
+                  </span>
+                </td>
+                <td className="px-2 py-1.5 text-right font-mono text-[10px]">{formatNumber(o.size)}</td>
+                <td className="px-2 py-1.5 text-right font-mono text-[10px]">{formatPercent(o.price)}</td>
+                <td className="px-2 py-1.5 text-right">
+                  {action === 'cancel' && (
+                    <button
+                      type="button"
+                      onClick={() => onCancel(o.id)}
+                      className="inline-flex items-center gap-0.5 rounded border border-error/30 bg-error/10 px-1.5 py-0.5 text-[10px] font-medium text-error hover:bg-error/20"
+                    >
+                      <XCircle className="h-2.5 w-2.5" />
+                      撤单
+                    </button>
+                  )}
+                  {action === 'forceClose' && (
+                    <button
+                      type="button"
+                      onClick={() => onForceClose(o.id)}
+                      title="只改本地状态，不向交易所发撤单请求"
+                      className="inline-flex items-center gap-0.5 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning hover:bg-warning/20"
+                    >
+                      <Eraser className="h-2.5 w-2.5" />
+                      消除
+                    </button>
+                  )}
+                  {action === 'none' && <span className="text-[10px] text-muted-foreground">—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
@@ -541,7 +958,23 @@ function OrdersTable({
                   <span className="text-[10px] text-foreground">{order.title_zh || '-'}</span>
                 </td>
                 <td className="px-3 py-2">
-                  <span className="text-[10px] text-foreground">{order.question_zh || '-'}</span>
+                  {/* 盘口名做成跳转：从订单直接到比赛管理里对应的那张盘口卡。
+                      eventId 后端已随订单带出；缺了就退化成纯文本，不给死链接 */}
+                  {order.market_id ? (
+                    <Link
+                      to={`/soccer?${new URLSearchParams({
+                        ...(order.event_id ? { eventId: String(order.event_id) } : {}),
+                        marketId: String(order.market_id),
+                      })}`}
+                      title="在比赛管理中查看该盘口"
+                      className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline"
+                    >
+                      {order.question_zh || '查看盘口'}
+                      <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                    </Link>
+                  ) : (
+                    <span className="text-[10px] text-foreground">{order.question_zh || '-'}</span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-center">
                   <span className={cn(
