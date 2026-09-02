@@ -13,6 +13,7 @@ import {
   computeBuyLimitPrice,
   computeOrderSize,
   evaluateBookQuality,
+  evaluateMatchClock,
   resolveAutoTradeParams,
   classifyBookState,
 } from './auto-trade.js'
@@ -414,4 +415,36 @@ test('默认仍是 taker，改动交易语义的开关不默认打开', () => {
   assert.equal(DEFAULT_AUTO_TRADE.buyOrderMode, 'taker')
   const r = computeBuyLimitPrice(snap(0.6, 0.62), P())
   assert.equal(r?.price, 0.64) // ask+缓冲，穿价
+})
+
+// ==================== 比赛时钟闸门 ====================
+
+const KICK = '2026-08-29T09:00:00Z'
+const at = (min: number) => Date.parse(KICK) + min * 60000
+
+test('比赛时钟闸门默认不启用，早买也放过', () => {
+  assert.equal(DEFAULT_AUTO_TRADE.minMatchMinute, 0)
+  assert.equal(evaluateMatchClock(KICK, DEFAULT_AUTO_TRADE.minMatchMinute, at(1)), null)
+})
+
+test('启用后拦掉开哨初期，到点后放行', () => {
+  assert.match(evaluateMatchClock(KICK, 30, at(10))!, /开哨后仅10分钟 < 下限30/)
+  assert.equal(evaluateMatchClock(KICK, 30, at(30)), null)   // 边界含等号
+  assert.equal(evaluateMatchClock(KICK, 30, at(75)), null)
+})
+
+test('开哨前就触发也算不足，用负分钟数如实写进 reason', () => {
+  const why = evaluateMatchClock(KICK, 30, at(-20))
+  assert.match(why!, /开哨后仅-20分钟/)
+})
+
+test('缺开哨时间或时间无法解析时放过，闸门不能变成静默全禁', () => {
+  assert.equal(evaluateMatchClock(null, 30, at(1)), null)
+  assert.equal(evaluateMatchClock(undefined, 30, at(1)), null)
+  assert.equal(evaluateMatchClock('', 30, at(1)), null)
+  assert.equal(evaluateMatchClock('不是时间', 30, at(1)), null)
+})
+
+test('闸门理由里带上「占用有限资金」，与 9.24 的动机一致', () => {
+  assert.match(evaluateMatchClock(KICK, 30, at(5))!, /占用有限资金/)
 })

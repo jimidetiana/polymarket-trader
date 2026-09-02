@@ -250,6 +250,33 @@ export function evaluateBookQuality(
   return null
 }
 
+/**
+ * 比赛时钟闸：开哨后不足 minMatchMinute 分钟就不买。
+ *
+ * 这一闸的目的不是提高胜率，是提高资金周转。见 types.ts 里 minMatchMinute 的注释
+ * 和 9.24：早买付的价最贵、锁的时间最长，而钱包受限时绑住吞吐的是「金额 × 时长」。
+ *
+ * kickoff 用 MatchContext.endTime，它是取整到整点/半点的计划开哨时刻，
+ * 所以这里算出的分钟数带最多 ±30 分钟的取整误差——闸门宽松一侧取整是安全的
+ * （宁可放过也不误杀），因为误杀掉的是本来能赚的单。
+ *
+ * 返回 null 表示通过（含未启用、缺开哨时间、时间无法解析）。
+ */
+export function evaluateMatchClock(
+  kickoff: string | null | undefined,
+  minMatchMinute: number,
+  now: number = Date.now(),
+): string | null {
+  if (!(minMatchMinute > 0)) return null
+  if (!kickoff) return null                      // 没有开哨时间就不拦，避免闸门变成静默全禁
+  const t = Date.parse(kickoff)
+  if (!Number.isFinite(t)) return null
+  const elapsed = (now - t) / 60000
+  if (elapsed >= minMatchMinute) return null
+  return `开哨后仅${elapsed.toFixed(0)}分钟 < 下限${minMatchMinute}，` +
+    `此时贴线盘口价格最贵且离结算最远，买入会长时间占用有限资金`
+}
+
 // ==================== 卖出前的盘口守卫 ====================
 
 /**

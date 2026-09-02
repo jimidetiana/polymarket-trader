@@ -46,6 +46,7 @@ import {
   computeBuyLimitPrice,
   computeOrderSize,
   evaluateBookQuality,
+  evaluateMatchClock,
   MIN_ORDER_SHARES,
   MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
@@ -1531,6 +1532,15 @@ async function reserveBuyOrder(
   const priced = computeBuyLimitPrice(snapshot, p)
   if (!priced) {
     await finish('skipped', 0, 0, '无法定价：bestAsk/bestBid 均缺失')
+    return
+  }
+
+  // ---- 比赛时钟：开哨初期不买 ----
+  // 排在盘口闸门之前：早买的单同时会撞上「价格贵」那几个闸门，先判时钟才能在
+  // reason 里看出「是因为太早被拦」，否则又会像 9.12 那样把归因掩盖掉。
+  const clock = evaluateMatchClock(rule.endTime, p.minMatchMinute)
+  if (clock) {
+    await finish('skipped', priced.price, 0, clock)
     return
   }
 

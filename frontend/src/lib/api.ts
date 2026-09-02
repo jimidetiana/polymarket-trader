@@ -941,6 +941,14 @@ export interface AutoTradeParams {
   buyOrderMode?: BuyOrderMode
   /** maker 模式下报价高出 bestBid 几个 tick。1 = 自己占一档（推荐），0 = 并到 bid 排队尾 */
   makerTickOffset?: number
+  /**
+   * 比赛时钟下限：开哨后不足该分钟数就不买，0 = 不启用。
+   *
+   * 冲的是资金周转不是胜率（见 docs/price-bot-analysis.md 第 9.24 节）：
+   * 开哨前 30 分钟买入付最贵的价、锁最久的资金、每笔还是亏的。
+   * 开哨时间用取整后的 end_time，有 ±30 分钟误差。
+   */
+  minMatchMinute?: number
 }
 
 /** 买入报价方式，见 AutoTradeParams.buyOrderMode */

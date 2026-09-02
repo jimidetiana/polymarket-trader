@@ -1558,6 +1558,14 @@ function AutoTradePanel({
         <NumField label="每日最多笔数" value={draft.maxOrdersPerDay} onChange={(v) => set('maxOrdersPerDay', v)} step={1} />
         <NumField label="每日金额上限（USDC）" value={draft.maxDailyNotional} onChange={(v) => set('maxDailyNotional', v)} step={10} />
         <NumField label="价格 tick" value={draft.tickSize} onChange={(v) => set('tickSize', v)} step={0.001} />
+        <NumField label="开哨后最少分钟" value={draft.minMatchMinute} onChange={(v) => set('minMatchMinute', v)} step={5} />
+        <p className="col-span-2 -mt-1 text-xs text-muted sm:col-span-4">
+          开哨后不足这么多分钟就不买。目的不是提高胜率，是提高资金周转：实测开哨前 30 分钟
+          那一段付最贵的价（均价 0.925）、锁最久的资金（持仓中位 74.9 分钟），每笔还是亏的
+          （ROI −6.4%）。设 30 时回测留下 28/40 笔，净利反而从 $15.29 升到 $19.83，
+          资金占用从 147.7 降到 60.5 美元·小时。开哨时间取自取整后的 end_time，有 ±30 分钟
+          误差，别设太贴。设 0 关闭。
+        </p>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
