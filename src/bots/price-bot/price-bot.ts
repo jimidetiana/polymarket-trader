@@ -1444,6 +1444,18 @@ async function evaluateGoalSurgeForId(
  */
 let orderGate: Promise<void> = Promise.resolve()
 
+/**
+ * 买入筛子的**全局连续**被拦次数（见 AutoTradeParams.buyDiceRamp）。
+ *
+ * 故意不按盘口存：93.4% 的盘口一辈子只产生 1 次买入机会，按盘口计数的话
+ * ramp 永远等不到第二次摇动，实测完全失效。全局计数才能兜住「连续十几次
+ * 被拦、机器人事实上停摆」这条长尾。
+ *
+ * 只活在内存里，重启归零（等于把已经攒下的放宽量清掉）。读写都在
+ * withOrderGate 的串行段内，所以并发触发不会写坏它。
+ */
+let diceMisses = 0
+
 function withOrderGate<T>(fn: () => Promise<T>): Promise<T> {
   const run = orderGate.then(fn, fn)
   // 无论成败都放行下一个，否则一次失败会永久堵死闸门
@@ -1610,11 +1622,11 @@ async function reserveBuyOrder(
     // ---- 买入筛子：必须是最后一道闸门 ----
     // 摆在所有闸门之后，筛子才只被「真要下单」的机会消耗。放前面的话会被
     // 2835 条评估级 skipped 摇空（真到这一步的只有 209 条，差 13 倍）。
-    // 也排在风控计数之后：额度已满的机会本来就不会成交，不该白摇一面。
-    if (p.buyDiceSides > 1) {
-      const monitor = state.monitors.get(rule.id!)
-      const roll = rollBuyDice(p.buyDiceSides, monitor?.buyDiceFaces)
-      if (monitor) monitor.buyDiceFaces = roll.faces
+    // 也排在风控计数之后：额度已满的机会本来就不会成交，不该白摇一次。
+    // 这里已在 withOrderGate 串行段内，所以全局计数器不会被并发触发写坏。
+    if (p.buyDiceThreshold > 0) {
+      const roll = rollBuyDice(p.buyDiceThreshold, p.buyDiceRamp, diceMisses)
+      diceMisses = roll.misses
       if (!roll.hit) {
         await finish('skipped', priced.price, size, roll.reason)
         return
@@ -2154,6 +2166,7 @@ export function __setVolatileForTest(disconnected: boolean, volatileMs = 0, preV
 export function __resetForTest(): void {
   state.monitors.clear()
   ruleCache.clear()
+  diceMisses = 0
   priceCache.clear()
   pendingReconnectEvents.length = 0
   preDisconnectPrices.clear()

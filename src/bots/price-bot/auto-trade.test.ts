@@ -461,80 +461,85 @@ const seq = (...vals: number[]) => {
   }
 }
 
-test('筛子默认不启用，直接放行且不占面数', () => {
-  assert.equal(DEFAULT_AUTO_TRADE.buyDiceSides, 0)
-  const r = rollBuyDice(DEFAULT_AUTO_TRADE.buyDiceSides, undefined, seq())
+test('筛子默认不启用，直接放行且不摇随机数', () => {
+  assert.equal(DEFAULT_AUTO_TRADE.buyDiceThreshold, 0)
+  const r = rollBuyDice(DEFAULT_AUTO_TRADE.buyDiceThreshold, DEFAULT_AUTO_TRADE.buyDiceRamp, 0, seq())
   assert.equal(r.hit, true)
-  assert.equal(r.face, null)
+  assert.equal(r.roll, null)
   assert.equal(r.reason, '')
 })
 
-test('1 面筛当作不启用，不能变成静默全禁', () => {
-  assert.equal(rollBuyDice(1, undefined, seq()).hit, true)
-  assert.equal(rollBuyDice(0, undefined, seq()).hit, true)
-  assert.equal(rollBuyDice(Number.NaN, undefined, seq()).hit, true)
+test('阈值非法或 <=0 当作不启用，不能变成静默全禁', () => {
+  assert.equal(rollBuyDice(0, 0.1, 0, seq()).hit, true)
+  assert.equal(rollBuyDice(-1, 0.1, 0, seq()).hit, true)
+  assert.equal(rollBuyDice(Number.NaN, 0.1, 0, seq()).hit, true)
 })
 
-test('摇到最大面才放行，摇中后清空池子让下一笔重新拿整副筛子', () => {
-  // 池子 [1..6]，rnd=5/6 → idx 5 → face 6
-  const r = rollBuyDice(6, undefined, seq(5 / 6))
-  assert.equal(r.face, 6)
+test('摇出的数小于阈值才放行，0.6 是严格小于', () => {
+  assert.equal(rollBuyDice(0.6, 0, 0, seq(0.5999)).hit, true)
+  assert.equal(rollBuyDice(0.6, 0, 0, seq(0.6)).hit, false)    // 边界不含等号
+  assert.equal(rollBuyDice(0.6, 0, 0, seq(0.7)).hit, false)
+})
+
+test('放行后连续被拦次数归零', () => {
+  const r = rollBuyDice(0.6, 0.1, 3, seq(0.1))
   assert.equal(r.hit, true)
-  assert.deepEqual(r.faces, [])
-  assert.match(r.reason, /摇出 6，摇中放行下单/)
+  assert.equal(r.misses, 0)
+  assert.match(r.reason, /放行下单/)
 })
 
-test('没摇中就把那一面拿掉，不放回', () => {
-  const r1 = rollBuyDice(6, undefined, seq(0))       // idx 0 → face 1
-  assert.equal(r1.face, 1)
+test('每被拦一次阈值抬高一档，reason 写出基础值和放宽量', () => {
+  const r1 = rollBuyDice(0.6, 0.1, 0, seq(0.9))
   assert.equal(r1.hit, false)
-  assert.deepEqual(r1.faces, [2, 3, 4, 5, 6])
-  assert.match(r1.reason, /下次命中概率 1\/5/)
+  assert.equal(r1.misses, 1)
+  assert.equal(r1.threshold, 0.6)
 
-  const r2 = rollBuyDice(6, r1.faces, seq(0))        // 池子 [2..6]，idx 0 → face 2
-  assert.equal(r2.face, 2)
-  assert.deepEqual(r2.faces, [3, 4, 5, 6])
+  // 已被拦 2 次 → 阈值 0.6+0.2=0.8，摇 0.75 就能过
+  const r2 = rollBuyDice(0.6, 0.1, 2, seq(0.75))
+  assert.equal(Number(r2.threshold.toFixed(4)), 0.8)
+  assert.equal(r2.hit, true)
+  assert.match(r2.reason, /连续被拦2次/)
 })
 
-test('最多摇 6 次必然放行一笔：连续躲开最大面后池子只剩 6', () => {
-  let faces: number[] | undefined = undefined
-  const drawn: number[] = []
-  for (let i = 0; i < 5; i++) {
-    // 每次都取 idx 0，即当前池子最小面，必然不是 6
-    const r = rollBuyDice(6, faces, seq(0))
-    assert.equal(r.hit, false, `第 ${i + 1} 次不该中`)
-    drawn.push(r.face!)
-    faces = r.faces
+test('突破阈值限制：连续被拦到阈值满 1.0 就必然放行，且不再摇随机数', () => {
+  // 0.6 + 4×0.1 = 1.0 → 第 5 次机会必然放行
+  const forced = rollBuyDice(0.6, 0.1, 4, seq())   // 随机源为空：摇一次就抛错
+  assert.equal(forced.hit, true)
+  assert.equal(forced.roll, null)
+  assert.equal(forced.threshold, 1)
+  assert.equal(forced.misses, 0)
+  assert.match(forced.reason, /阈值放宽到 1.00，必然放行/)
+})
+
+test('最多被连续拦 ceil((1−阈值)/ramp) 次：0.6 + 0.1 → 第 5 次必过', () => {
+  let misses = 0
+  for (let i = 0; i < 4; i++) {
+    // 每次都摇 0.999，只有阈值抬到 1.0 才可能放行
+    const r = rollBuyDice(0.6, 0.1, misses, seq(0.999))
+    assert.equal(r.hit, false, `第 ${i + 1} 次不该放行`)
+    misses = r.misses
   }
-  assert.deepEqual(drawn, [1, 2, 3, 4, 5])
-  assert.deepEqual(faces, [6])
-  // 第 6 次：池子只剩 [6]，任何随机值都必中
-  const last = rollBuyDice(6, faces, seq(0.99))
-  assert.equal(last.face, 6)
+  assert.equal(misses, 4)
+  const last = rollBuyDice(0.6, 0.1, misses, seq())
   assert.equal(last.hit, true)
 })
 
-test('只剩一面时提示下次必中，便于在日志里读出闸门状态', () => {
-  assert.match(rollBuyDice(2, undefined, seq(0)).reason, /（下次必中）/)
+test('ramp=0 时阈值不放宽，日志要说清楚下次还是同一阈值', () => {
+  const r = rollBuyDice(0.6, 0, 5, seq(0.9))
+  assert.equal(r.threshold, 0.6)
+  assert.equal(r.hit, false)
+  assert.match(r.reason, /未开启放宽/)
 })
 
-test('rnd 返回边界值不越界取面', () => {
-  // Math.random 契约是 [0,1)，但真实实现/注入源可能给到 1，越界会取到 undefined
-  const hi = rollBuyDice(6, undefined, seq(1))
-  assert.equal(hi.face, 6)
-  const lo = rollBuyDice(6, undefined, seq(-0.5))
-  assert.equal(lo.face, 1)
+test('阈值 >=1 恒放行；负 ramp 视为不放宽', () => {
+  assert.equal(rollBuyDice(1, 0, 0, seq()).hit, true)
+  assert.equal(rollBuyDice(1.5, 0, 0, seq()).hit, true)
+  const r = rollBuyDice(0.6, -0.5, 3, seq(0.9))
+  assert.equal(r.threshold, 0.6)              // 负 ramp 不会把阈值拉低
 })
 
-test('无条件命中率是 1/面数：每一面都恰好被摇到一次', () => {
-  // 不放回下「6 在随机排列里的位置」均匀分布，等价于每次机会 1/6。
-  // 这里用固定序列穷举 idx=0 的路径，确认 6 次机会里恰好放行 1 笔。
-  let faces: number[] | undefined = undefined
-  let hits = 0
-  for (let i = 0; i < 6; i++) {
-    const r = rollBuyDice(6, faces, seq(0))
-    if (r.hit) hits++
-    faces = r.faces
-  }
-  assert.equal(hits, 1)
+test('阈值口径涵盖旧的面数口径：六面筛 ≡ 阈值 1/6', () => {
+  const t = 1 / 6
+  assert.equal(rollBuyDice(t, 0, 0, seq(0.16)).hit, true)     // 0.16 < 0.1667
+  assert.equal(rollBuyDice(t, 0, 0, seq(0.17)).hit, false)
 })

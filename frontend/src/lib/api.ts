@@ -950,13 +950,17 @@ export interface AutoTradeParams {
    */
   minMatchMinute?: number
   /**
-   * 买入前摇筛子的面数（0/1 = 不启用）。摇到最大面才下单，没中就把那一面
-   * 从池子里拿掉、这次机会作废，最多摇 N 次必然放行一笔。
+   * 买入前摇 [0,1) 随机数，小于该阈值才下单（0 = 不启用，0.6 = 六成放行）。
    *
-   * ⚠ 无信息的随机丢弃，代价实测很大：六面筛把回测净利从 $18.80 打到 $0.18。
-   * 见 docs/price-bot-analysis.md 9.25。
+   * ⚠ 是节流阀不是筛选器：阈值 0.6 回测只保住 53% 的净利，但每笔 EV 几乎不变
+   * （ROI +7.2% → +6.1%）。见 docs/price-bot-analysis.md 9.26。
    */
-  buyDiceSides?: number
+  buyDiceThreshold?: number
+  /**
+   * 连续被筛子拦下时每次把阈值抬高多少（0 = 不放宽）。抬到 1.0 必然放行，
+   * 所以最多被连续拦 ceil((1−阈值)/ramp) 次。计数是全局连续的，不按盘口。
+   */
+  buyDiceRamp?: number
 }
 
 /** 买入报价方式，见 AutoTradeParams.buyOrderMode */
