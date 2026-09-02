@@ -422,6 +422,60 @@ export async function fetchTodaysSoccerEvents(): Promise<{ events: number }> {
   return { events: mainEvents.length };
 }
 
+/**
+ * 按 market id 直查单个盘口，包含**已结算**的。
+ *
+ * 为什么不复用 fetchEventMarketsFromGamma：那个函数按 event id 查，只能拿到主赛事
+ * 的盘口（胜平负）。大小球盘口挂在衍生赛事（"A vs. B - Total Goals"）下，而它搜索
+ * 衍生赛事那一路带着 `active:true, closed:false`，已结算的一律搜不到。
+ *
+ * 必须用路径式 `/markets/{id}`。实测查询参数式 `/markets?id=3722830` 返回空数组，
+ * 而 `/markets/3722830` 正常返回 `closed=true, outcomePrices=["1","0"]`。
+ *
+ * 也**不要**试图用 `?token_id=`：gamma 静默忽略这个参数，照样返回 20 个无关盘口
+ * （实测第一条是 "Xi Jinping out before 2027?"）。当成命中就会把别人的结算价
+ * 写进我们的规则。
+ *
+ * 返回 null 表示 gamma 里没有这个盘口。
+ */
+export async function fetchMarketByIdFromGamma(marketId: string): Promise<{
+  id: string;
+  question: string;
+  outcomes: string[];
+  outcomePrices: number[];
+  closed: boolean;
+} | null> {
+  const client = createGammaClient();
+  const response = await client.get<GammaMarket & { outcomePrices?: string | string[] }>(
+    `/markets/${encodeURIComponent(marketId)}`,
+    { timeout: 60000 },
+  );
+  const m = response.data;
+  // 路径式在盘口不存在时可能返回空对象而不是 404，两种都当"没有"
+  if (!m || String(m.id ?? '') === '') return null;
+
+  const asArray = (v: unknown): string[] => {
+    if (Array.isArray(v)) return v.map((x) => String(x));
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v);
+        return Array.isArray(parsed) ? parsed.map((x) => String(x)) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  };
+
+  return {
+    id: String(m.id),
+    question: String(m.question ?? ''),
+    outcomes: asArray(m.outcomes),
+    outcomePrices: asArray((m as any).outcomePrices).map((x) => Number(x)),
+    closed: Boolean((m as any).closed),
+  };
+}
+
 export async function fetchEventMarketsFromGamma(eventId: string): Promise<SoccerMarketRow[]> {
   const client = createGammaClient();
   const response = await client.get<GammaEvent[]>('/events', {

@@ -250,6 +250,25 @@ async function ensureRuleColumns(): Promise<void> {
     // 塞进同一个枚举就没法区分「完结后又被重新启用」这种状态。
     // NULL = 未完结，有值 = 已完结待链上结算。
     ['settled_at', 'DATETIME DEFAULT NULL', null],
+    // 链上结算真相。必须存在规则行上，不能只靠 soccer_markets.outcome_prices：
+    //
+    // 1. soccer_markets 是 ON DELETE CASCADE 挂在 soccer_events 上的，
+    //    而 deleteClosedEvents() 每轮同步都会删掉 event_status='closed' 的赛事，
+    //    结算价随之消失。
+    // 2. 更要紧的是同步压根抓不到结算价：fetchTodaysSoccerEvents 用
+    //    `active:true, closed:false` 且只取 48 小时窗口，已结算盘口永远不在结果里。
+    //    实测 172 条 buy_signal 规则中 129 条拿不到链上真相，其中 117 条的盘口行
+    //    最后一次同步发生在开球之前。
+    //
+    // 没有这一列，唯一能用的「赢」判据是价格日志里出现过 bid>=0.99。那个判据
+    // 精确率 100%（29/29 对上链上结算无一例外）但召回率只有 80.6%——7 条链上
+    // 结算为 YES 的规则最高 bid 只到 0.60~0.98，监控在价格涨上去之前就停了，
+    // 于是被算成亏损。所有 EV 因此系统性偏悲观。
+    //
+    // 'yes' = 我们买的那一腿结算为 1，'no' = 结算为 0。NULL = 尚未回填。
+    ['settled_outcome', "VARCHAR(10) DEFAULT NULL COMMENT 'yes/no，链上结算真相'", null],
+    ['settled_price', 'DECIMAL(8,4) DEFAULT NULL', null],
+    ['outcome_synced_at', 'DATETIME DEFAULT NULL', null],
   ]
 
   for (const [name, ddl, fallback] of additions) {
@@ -438,6 +457,63 @@ export async function markRuleSettled(id: number, settled: boolean): Promise<boo
     [id],
   )
   return result.affectedRows > 0
+}
+
+/**
+ * 待回填结算真相的规则：比赛已结束、还没有 settled_outcome。
+ *
+ * 「已结束」用 `end_time + 3 小时`。end_time 存的是**开球时间**而不是终场时间——
+ * gamma 的 endDate 对进行中的足球盘口给的是开赛时刻，实测 79 个买入信号里
+ * 78 个落在 end_time 之后的 [-10, 130] 分钟内，computeMatchStatus()
+ * （soccer/db.ts）也是按这个口径把 end_time 当 kickoff 用的。3 小时 = 90 分钟
+ * 比赛 + 中场 + 补时 + 结算延迟。
+ */
+export async function listRulesPendingOutcome(limit = 200): Promise<Array<{
+  id: number
+  eventId: string
+  marketId: string
+  tokenId: string
+  outcome: string
+}>> {
+  await ensureTables()
+  const [rows] = await pool.query<any[]>(
+    `SELECT r.id, r.event_id, r.market_id, r.token_id, r.outcome
+       FROM price_bot_rules r
+       JOIN soccer_events e ON e.id = r.event_id
+      WHERE r.settled_outcome IS NULL
+        AND e.end_time IS NOT NULL
+        AND e.end_time < UTC_TIMESTAMP() - INTERVAL 3 HOUR
+      ORDER BY e.end_time DESC
+      LIMIT ${Math.max(1, Math.min(1000, Math.floor(limit)))}`,
+  )
+  return rows.map((r) => ({
+    id: Number(r.id),
+    eventId: String(r.event_id),
+    marketId: String(r.market_id),
+    tokenId: String(r.token_id),
+    outcome: String(r.outcome),
+  }))
+}
+
+/**
+ * 写入一条规则的链上结算真相。
+ *
+ * price 是我们买的那一腿的结算价。判定用 0.99/0.01 而不是 1/0：
+ * gamma 返回的已结算价格常是 0.9995 / 0.0005 这类值，卡死 1.0 会全部漏掉。
+ * 落在中间的一律不写——那说明盘口还没结算完，宁可留 NULL 下次再试。
+ */
+export async function recordRuleOutcome(ruleId: number, price: number): Promise<'yes' | 'no' | null> {
+  await ensureTables()
+  if (!Number.isFinite(price)) return null
+  const outcome = price >= 0.99 ? 'yes' : price <= 0.01 ? 'no' : null
+  if (!outcome) return null
+  await pool.execute(
+    `UPDATE price_bot_rules
+        SET settled_outcome = ?, settled_price = ?, outcome_synced_at = UTC_TIMESTAMP()
+      WHERE id = ?`,
+    [outcome, price, ruleId],
+  )
+  return outcome
 }
 
 export async function deleteRule(id: number): Promise<boolean> {

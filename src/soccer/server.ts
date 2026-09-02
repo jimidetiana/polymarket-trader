@@ -77,6 +77,7 @@ import {
   getConnectionState,
   cancelRestingBuyOrders,
 } from '../bots/price-bot/price-bot.js';
+import { syncRuleOutcomes } from '../bots/price-bot/outcome-sync.js';
 import { config } from '../config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1632,6 +1633,23 @@ app.get('/api/bots/price-bot/orders', asyncHandler(async (req, res) => {
     limit: limit !== undefined ? Number(limit) : undefined,
     offset: offset !== undefined ? Number(offset) : undefined,
   });
+  res.json({ success: true, ...result });
+}));
+
+/**
+ * 回填规则的链上结算真相。
+ *
+ * 常规同步（fetchTodaysSoccerEvents）用 `active:true, closed:false` + 48 小时窗口，
+ * 已结算盘口按定义不在结果里，所以结算价永远进不了库——实测 172 条 buy_signal
+ * 规则里 129 条拿不到真相。没有真相就只能用「价格日志出现过 bid>=0.99」当赢判据，
+ * 那个判据精确率 100% 但召回率只有 80.6%，所有 EV 系统性偏悲观。
+ * 详见 bots/price-bot/outcome-sync.ts 的文件头。
+ *
+ * 用 POST 而不是 GET：它会写库，且会对外发起 N 次 gamma 请求（按赛事分组）。
+ */
+app.post('/api/bots/price-bot/rules/sync-outcomes', asyncHandler(async (req, res) => {
+  const limit = req.body?.limit !== undefined ? Number(req.body.limit) : 200;
+  const result = await syncRuleOutcomes(Number.isFinite(limit) ? limit : 200);
   res.json({ success: true, ...result });
 }));
 
