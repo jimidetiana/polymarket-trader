@@ -1566,6 +1566,19 @@ function AutoTradePanel({
           资金占用从 147.7 降到 60.5 美元·小时。开哨时间取自取整后的 end_time，有 ±30 分钟
           误差，别设太贴。设 0 关闭。
         </p>
+        <NumField label="买入前摇筛子（面数）" value={draft.buyDiceSides} onChange={(v) => set('buyDiceSides', v)} step={1} />
+        <p className="col-span-2 -mt-1 text-xs text-muted sm:col-span-4">
+          所有闸门都过了、真要下单那一刻摇一次筛子，摇到最大面才下单；没中就把那一面从池子里
+          拿掉、这次机会作废，下次同一盘口再触发时从剩下的面里摇。摇到只剩最大面时必中，
+          所以最多摇 N 次一定会下一笔。设 0 或 1 关闭。
+          <span className="text-warning">
+            {' '}⚠ 代价实测很大：六面筛把回测净利从 $18.80 打到 $0.18（ROI +7.2% → +0.3%）。
+          </span>
+          {' '}两个原因：86 个盘口里 68 个一辈子只有 1 次买入机会（中位数 1），六面筛对它们不是
+          「延迟」而是 5/6 概率永久放弃，只有 12.8% 的盘口能攒够 6 次机会做到必买；而且筛子
+          偏向留下反复触发的盘口，反复触发的恰恰是假突破（4 个多机会盘口里 3 个净亏），
+          一次性触发的干净信号反被丢掉。想温和些就调小面数（2 面保住 41% 净利、3 面 22%）。
+        </p>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">

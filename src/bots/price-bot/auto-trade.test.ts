@@ -14,6 +14,7 @@ import {
   computeOrderSize,
   evaluateBookQuality,
   evaluateMatchClock,
+  rollBuyDice,
   resolveAutoTradeParams,
   classifyBookState,
 } from './auto-trade.js'
@@ -447,4 +448,93 @@ test('缺开哨时间或时间无法解析时放过，闸门不能变成静默�
 
 test('闸门理由里带上「占用有限资金」，与 9.24 的动机一致', () => {
   assert.match(evaluateMatchClock(KICK, 30, at(5))!, /占用有限资金/)
+})
+
+// ==================== 买入筛子 ====================
+
+/** 固定随机源：依次返回给定的 [0,1) 值，用完抛错（防止测试悄悄多摇一次） */
+const seq = (...vals: number[]) => {
+  let i = 0
+  return () => {
+    if (i >= vals.length) throw new Error('随机源被多取了一次')
+    return vals[i++]
+  }
+}
+
+test('筛子默认不启用，直接放行且不占面数', () => {
+  assert.equal(DEFAULT_AUTO_TRADE.buyDiceSides, 0)
+  const r = rollBuyDice(DEFAULT_AUTO_TRADE.buyDiceSides, undefined, seq())
+  assert.equal(r.hit, true)
+  assert.equal(r.face, null)
+  assert.equal(r.reason, '')
+})
+
+test('1 面筛当作不启用，不能变成静默全禁', () => {
+  assert.equal(rollBuyDice(1, undefined, seq()).hit, true)
+  assert.equal(rollBuyDice(0, undefined, seq()).hit, true)
+  assert.equal(rollBuyDice(Number.NaN, undefined, seq()).hit, true)
+})
+
+test('摇到最大面才放行，摇中后清空池子让下一笔重新拿整副筛子', () => {
+  // 池子 [1..6]，rnd=5/6 → idx 5 → face 6
+  const r = rollBuyDice(6, undefined, seq(5 / 6))
+  assert.equal(r.face, 6)
+  assert.equal(r.hit, true)
+  assert.deepEqual(r.faces, [])
+  assert.match(r.reason, /摇出 6，摇中放行下单/)
+})
+
+test('没摇中就把那一面拿掉，不放回', () => {
+  const r1 = rollBuyDice(6, undefined, seq(0))       // idx 0 → face 1
+  assert.equal(r1.face, 1)
+  assert.equal(r1.hit, false)
+  assert.deepEqual(r1.faces, [2, 3, 4, 5, 6])
+  assert.match(r1.reason, /下次命中概率 1\/5/)
+
+  const r2 = rollBuyDice(6, r1.faces, seq(0))        // 池子 [2..6]，idx 0 → face 2
+  assert.equal(r2.face, 2)
+  assert.deepEqual(r2.faces, [3, 4, 5, 6])
+})
+
+test('最多摇 6 次必然放行一笔：连续躲开最大面后池子只剩 6', () => {
+  let faces: number[] | undefined = undefined
+  const drawn: number[] = []
+  for (let i = 0; i < 5; i++) {
+    // 每次都取 idx 0，即当前池子最小面，必然不是 6
+    const r = rollBuyDice(6, faces, seq(0))
+    assert.equal(r.hit, false, `第 ${i + 1} 次不该中`)
+    drawn.push(r.face!)
+    faces = r.faces
+  }
+  assert.deepEqual(drawn, [1, 2, 3, 4, 5])
+  assert.deepEqual(faces, [6])
+  // 第 6 次：池子只剩 [6]，任何随机值都必中
+  const last = rollBuyDice(6, faces, seq(0.99))
+  assert.equal(last.face, 6)
+  assert.equal(last.hit, true)
+})
+
+test('只剩一面时提示下次必中，便于在日志里读出闸门状态', () => {
+  assert.match(rollBuyDice(2, undefined, seq(0)).reason, /（下次必中）/)
+})
+
+test('rnd 返回边界值不越界取面', () => {
+  // Math.random 契约是 [0,1)，但真实实现/注入源可能给到 1，越界会取到 undefined
+  const hi = rollBuyDice(6, undefined, seq(1))
+  assert.equal(hi.face, 6)
+  const lo = rollBuyDice(6, undefined, seq(-0.5))
+  assert.equal(lo.face, 1)
+})
+
+test('无条件命中率是 1/面数：每一面都恰好被摇到一次', () => {
+  // 不放回下「6 在随机排列里的位置」均匀分布，等价于每次机会 1/6。
+  // 这里用固定序列穷举 idx=0 的路径，确认 6 次机会里恰好放行 1 笔。
+  let faces: number[] | undefined = undefined
+  let hits = 0
+  for (let i = 0; i < 6; i++) {
+    const r = rollBuyDice(6, faces, seq(0))
+    if (r.hit) hits++
+    faces = r.faces
+  }
+  assert.equal(hits, 1)
 })

@@ -47,6 +47,7 @@ import {
   computeOrderSize,
   evaluateBookQuality,
   evaluateMatchClock,
+  rollBuyDice,
   MIN_ORDER_SHARES,
   MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
@@ -1575,6 +1576,9 @@ async function reserveBuyOrder(
     return
   }
 
+  // 摇中的那一面记进成功单的 reason，事后能对着日志复核筛子序列
+  let diceNote = ''
+
   // ---- 风控 + 下单：整段串行，避免并发触发时越过每日上限 ----
   await withOrderGate(async () => {
     let counts: { ruleTotal: number; dayTotal: number; dayNotional: number }
@@ -1603,6 +1607,21 @@ async function reserveBuyOrder(
       return
     }
 
+    // ---- 买入筛子：必须是最后一道闸门 ----
+    // 摆在所有闸门之后，筛子才只被「真要下单」的机会消耗。放前面的话会被
+    // 2835 条评估级 skipped 摇空（真到这一步的只有 209 条，差 13 倍）。
+    // 也排在风控计数之后：额度已满的机会本来就不会成交，不该白摇一面。
+    if (p.buyDiceSides > 1) {
+      const monitor = state.monitors.get(rule.id!)
+      const roll = rollBuyDice(p.buyDiceSides, monitor?.buyDiceFaces)
+      if (monitor) monitor.buyDiceFaces = roll.faces
+      if (!roll.hit) {
+        await finish('skipped', priced.price, size, roll.reason)
+        return
+      }
+      diceNote = ` ${roll.reason}`
+    }
+
     try {
       const result = await placeOrder({
         market_id: rule.marketId,
@@ -1618,7 +1637,7 @@ async function reserveBuyOrder(
           result.simulated ? 'simulated' : 'placed',
           priced.price,
           size,
-          `定价=${priced.basis} ${result.message}`,
+          `定价=${priced.basis} ${result.message}${diceNote}`,
           { tradeOrderId: result.orderId ?? null, clobOrderId: result.clobOrderId ?? null },
         )
         console.log(

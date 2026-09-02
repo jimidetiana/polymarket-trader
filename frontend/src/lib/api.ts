@@ -949,6 +949,14 @@ export interface AutoTradeParams {
    * 开哨时间用取整后的 end_time，有 ±30 分钟误差。
    */
   minMatchMinute?: number
+  /**
+   * 买入前摇筛子的面数（0/1 = 不启用）。摇到最大面才下单，没中就把那一面
+   * 从池子里拿掉、这次机会作废，最多摇 N 次必然放行一笔。
+   *
+   * ⚠ 无信息的随机丢弃，代价实测很大：六面筛把回测净利从 $18.80 打到 $0.18。
+   * 见 docs/price-bot-analysis.md 9.25。
+   */
+  buyDiceSides?: number
 }
 
 /** 买入报价方式，见 AutoTradeParams.buyOrderMode */

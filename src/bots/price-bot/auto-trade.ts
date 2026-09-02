@@ -277,6 +277,75 @@ export function evaluateMatchClock(
     `此时贴线盘口价格最贵且离结算最远，买入会长时间占用有限资金`
 }
 
+// ==================== 买入筛子 ====================
+
+/** 摇一次筛子的结果，见 rollBuyDice */
+export interface DiceRoll {
+  /** 摇出的面；筛子未启用时为 null */
+  face: number | null
+  /** 是否摇中（face === 面数上限），中了才放行下单 */
+  hit: boolean
+  /** 摇完之后剩下的面（不放回）。摇中时为空数组：下一笔重新拿整副筛子 */
+  faces: number[]
+  /** 人话说明，直接写进 price_bot_orders.reason */
+  reason: string
+}
+
+/**
+ * 买入前摇筛子（不放回抽样）。纯函数，随机源可注入以便测试。
+ *
+ * 摇到最大面（=sides）才放行；没中就把摇出的那一面从池子里去掉。
+ * 池子摇空前必然摇到最大面，所以最多 sides 次机会一定放行一笔。
+ *
+ * 必须放在**所有闸门之后、真要下单的那一刻**调用：放在前面的话，
+ * 池子会被「总开关关闭 / 无法定价 / 价差超限」这些压根不会成交的评估
+ * 白白消耗掉——实测这类评估有 2835 条、真到下单阶段的只有 209 条，
+ * 差 13 倍，筛子会在第一场比赛里就被噪声摇空。
+ *
+ * @param sides 面数，<=1 视为不启用（直接放行）
+ * @param remaining 上次摇剩的面；undefined/空表示重新装满
+ * @param rnd [0,1) 随机源，默认 Math.random
+ */
+export function rollBuyDice(
+  sides: number,
+  remaining: number[] | undefined,
+  rnd: () => number = Math.random,
+): DiceRoll {
+  // <=1 面没有随机性可言（1 面筛必中），当作不启用，避免「设成 1 反而全禁」
+  if (!Number.isFinite(sides) || sides <= 1) {
+    return { face: null, hit: true, faces: [], reason: '' }
+  }
+  const n = Math.floor(sides)
+  // 池子空了（或没传）就重新装满 1..n
+  const pool = remaining && remaining.length > 0
+    ? [...remaining]
+    : Array.from({ length: n }, (_, i) => i + 1)
+
+  const idx = Math.min(pool.length - 1, Math.max(0, Math.floor(rnd() * pool.length)))
+  const face = pool[idx]
+  const hit = face === n
+
+  if (hit) {
+    // 摇中：清空池子，下一笔重新拿整副筛子
+    return {
+      face,
+      hit: true,
+      faces: [],
+      reason: `摇筛子${n}面：摇出 ${face}，摇中放行下单`,
+    }
+  }
+  const left = pool.filter((f) => f !== face)
+  return {
+    face,
+    hit: false,
+    faces: left,
+    reason:
+      `摇筛子${n}面：摇出 ${face}（需 ${n}），本次机会作废。` +
+      `剩余面 [${left.join(',')}]，下次命中概率 1/${left.length}` +
+      (left.length === 1 ? '（下次必中）' : ''),
+  }
+}
+
 // ==================== 卖出前的盘口守卫 ====================
 
 /**
