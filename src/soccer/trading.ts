@@ -4,6 +4,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { config } from '../config.js';
 import { updateWalletBalance, getOrCreateWallet, syncOnChainBalance } from './wallet.js';
 import { insertOrder, updateOrderStatus, getOrder } from './db.js';
+import { canSynchronizeOrders, type OrderSyncSourceState } from './order-sync-state.js';
 import { pool } from './db.js';
 import { getV2Client, getV2Creds } from '../api/clob-v2.js';
 
@@ -323,20 +324,24 @@ export async function cancelAllOrders(): Promise<{ success: boolean; message: st
   }
 }
 
+/**
+ * 读取交易所当前挂单。
+ *
+ * 空数组是一次成功查询（代表当前没有挂单），不能和网络/鉴权失败混为一谈；
+ * 调用方若需要安全降级，应自行 catch 后明确标记「交易所不可达」。
+ */
 export async function getOpenOrders(): Promise<unknown[]> {
   if (isSimulated()) {
-    return [];
+    throw new Error('模拟模式，无法读取交易所挂单');
   }
 
-  try {
-    const client = await getClobClient();
-    await getV2Creds();
-    const orders = await client.getOpenOrders();
-    return Array.isArray(orders) ? orders : [];
-  } catch {
-    return [];
-  }
+  const client = await getClobClient();
+  await getV2Creds();
+  const orders = await client.getOpenOrders();
+  return Array.isArray(orders) ? orders : [];
 }
+
+const MAX_TRADE_SYNC_PAGES = 10;
 
 /**
  * 从 Polymarket 平台同步订单状态并导入链上缺失的订单
@@ -347,20 +352,30 @@ export async function getOpenOrders(): Promise<unknown[]> {
  * 3. 导入链上存在但本地没有的订单（挂单 + 成交）
  * 4. 对已有本地订单，对比更新状态
  */
-export async function syncOrderStatus(): Promise<{
+export type OrderSyncResult = {
   success: boolean;
   message: string;
   total: number;
   matched: number;
   updated: number;
   imported: number;
+  /** 本地订单因拿不到足够交易所资料而保持原状态的数量。 */
+  unverified: number;
+  openOrdersRead: boolean;
+  tradesRead: boolean;
+  tradesTruncated: boolean;
+  openOrdersError?: string;
+  tradesError?: string;
   details: Array<{ id: number; clobOrderId: string | null; oldStatus: string; newStatus: string; clobStatus?: string; sizeMatched?: string }>;
-}> {
+};
+
+export async function syncOrderStatus(): Promise<OrderSyncResult> {
   if (isSimulated()) {
     return {
       success: false,
       message: '模拟模式，无法同步',
-      total: 0, matched: 0, updated: 0, imported: 0,
+      total: 0, matched: 0, updated: 0, imported: 0, unverified: 0,
+      openOrdersRead: false, tradesRead: false, tradesTruncated: false,
       details: [],
     };
   }
@@ -399,40 +414,56 @@ export async function syncOrderStatus(): Promise<{
       for (const tid of tokenIds) tokenToMarket.set(tid, String(m.id));
     }
 
-    // 3. 获取 CLOB 平台当前打开的订单
-    let openOrderMap = new Map<string, any>();
+    // 3. 获取 CLOB 平台当前打开的订单。空数组表示查询成功但没有挂单。
+    const openOrderMap = new Map<string, any>();
     let clobOpenOrders: any[] = [];
+    let openOrdersRead = false;
+    let openOrdersError: string | undefined;
     try {
-      clobOpenOrders = await client.getOpenOrders();
-      for (const o of (Array.isArray(clobOpenOrders) ? clobOpenOrders : [])) {
+      const response = await client.getOpenOrders();
+      clobOpenOrders = Array.isArray(response) ? response : [];
+      openOrdersRead = true;
+      for (const o of clobOpenOrders) {
         const oid = (o as any).id || (o as any).orderID || '';
         if (oid) openOrderMap.set(oid, o);
       }
     } catch (e: any) {
-      console.log('[Sync] 获取平台挂单失败:', e.message || e);
+      openOrdersError = e?.message || String(e);
+      console.log('[Sync] 获取平台挂单失败:', openOrdersError);
     }
 
-    // 4. 获取成交记录（分页获取，最多10页）
+    // 4. 获取成交记录。达到上限仍有游标时明确告诉调用端，没有默默冒充全量历史。
     const allTrades: any[] = [];
+    let tradesRead = false;
+    let tradesTruncated = false;
+    let tradesError: string | undefined;
     try {
-      let nextCursor: string | undefined = undefined;
-      for (let i = 0; i < 10; i++) {
-        let resp: any;
-        if (nextCursor) {
-          resp = await client.getTradesPaginated({}, nextCursor);
-        } else {
-          resp = await client.getTradesPaginated();
-        }
+      let nextCursor: string | undefined;
+      for (let i = 0; i < MAX_TRADE_SYNC_PAGES; i++) {
+        const resp: any = nextCursor
+          ? await client.getTradesPaginated({}, nextCursor)
+          : await client.getTradesPaginated();
         const trades = resp?.trades || (Array.isArray(resp) ? resp : []);
         if (trades.length) allTrades.push(...trades);
         nextCursor = resp?.next_cursor || undefined;
         if (!nextCursor || nextCursor === 'LTE=' || nextCursor === '-1') break;
+        if (i === MAX_TRADE_SYNC_PAGES - 1) tradesTruncated = true;
       }
+      tradesRead = true;
     } catch (e: any) {
-      console.log('[Sync] 获取成交记录失败:', e.message || e);
+      tradesError = e?.message || String(e);
+      console.log('[Sync] 获取成交记录失败:', tradesError);
     }
 
-    const clobApiAvailable = openOrderMap.size > 0 || allTrades.length > 0;
+    const sourceState = { openOrdersRead, tradesRead, tradesTruncated };
+    if (!canSynchronizeOrders(sourceState)) {
+      return {
+        success: false,
+        message: '交易所订单和成交记录都无法读取，未修改本地订单',
+        total: 0, matched: 0, updated: 0, imported: 0, unverified: 0,
+        ...sourceState, openOrdersError, tradesError, details: [],
+      };
+    }
     let importedCount = 0;
 
     // 5. 导入链上存在但本地没有的挂单
@@ -507,7 +538,7 @@ export async function syncOrderStatus(): Promise<{
           .map((mo: any) => mo?.order_id)
           .filter(Boolean),
       );
-      if ([...makerOrderIds].some((id) => localClobIds.has(id))) continue;
+      if ([...makerOrderIds].some((id) => localClobIds.has(String(id)))) continue;
 
       const first = trades[0];
       const tokenId = String(first.asset_id || '');
@@ -542,9 +573,9 @@ export async function syncOrderStatus(): Promise<{
     if (!localOrders.length) {
       return {
         success: true,
-        message: '没有订单需要同步',
-        total: 0, matched: 0, updated: 0, imported: 0,
-        details: [],
+        message: '交易所读取成功：没有订单需要同步',
+        total: 0, matched: 0, updated: 0, imported: 0, unverified: 0,
+        ...sourceState, openOrdersError, tradesError, details: [],
       };
     }
 
@@ -552,6 +583,7 @@ export async function syncOrderStatus(): Promise<{
     const details: Array<{ id: number; clobOrderId: string | null; oldStatus: string; newStatus: string; clobStatus?: string; sizeMatched?: string }> = [];
     let matchedCount = 0;
     let updatedCount = 0;
+    let unverifiedCount = 0;
     const walletAddr = getFundingAddress();
 
     for (const localOrder of localOrders) {
@@ -562,11 +594,6 @@ export async function syncOrderStatus(): Promise<{
       let newStatus: string = localOrder.order_status;
       let sizeMatched: string | undefined;
 
-      if (!clobApiAvailable) {
-        matchedCount++;
-        continue;
-      }
-
       // 终态订单不被覆盖：已结算(settled)和下单失败(failed)不参与同步
       // failed 订单从未上链，无 CLOB ID，按 token_id 匹配会误判为其他订单的成交
       if (localOrder.order_status === 'settled' || localOrder.order_status === 'failed') {
@@ -575,7 +602,7 @@ export async function syncOrderStatus(): Promise<{
       }
 
       if (clobOrderId) {
-        if (openOrderMap.has(clobOrderId)) {
+        if (openOrdersRead && openOrderMap.has(clobOrderId)) {
           const clobOrder = openOrderMap.get(clobOrderId);
           clobStatus = clobOrder?.status || 'LIVE';
           sizeMatched = clobOrder?.size_matched || '0';
@@ -590,26 +617,25 @@ export async function syncOrderStatus(): Promise<{
             newStatus = 'open';
           }
         } else {
-          // 不在 open 列表：先查 trades（成交记录最可靠），再查 getOrder
-          let trades = tradesByOrderId.get(clobOrderId);
-          // 如果 taker 方向没找到，试试 maker 方向（用户作为挂单方成交）
-          if (!trades || trades.length === 0) {
+          // 不在已成功读取的 open 列表：先查成功读取到的 trades，再查 getOrder 精确状态。
+          let trades = tradesRead ? tradesByOrderId.get(clobOrderId) : undefined;
+          if ((!trades || trades.length === 0) && tradesRead) {
             const makerTrades = tradesByMakerOrderId.get(clobOrderId);
             if (makerTrades && makerTrades.length > 0) trades = makerTrades;
           }
           if (trades && trades.length > 0) {
-            // 有成交记录 → 根据成交量判断状态
             const totalMatched = trades.reduce((sum, t) => sum + Number(t.size || 0), 0);
             sizeMatched = String(totalMatched);
             newStatus = totalMatched >= Number(localOrder.size) ? 'filled' : 'partial';
           } else {
-            // 无成交记录，尝试 getOrder 查询精确状态
+            // 空挂单列表也是正常成功响应；此处仍须逐笔查询，不能把它当 API 不可用而跳过。
             try {
               const orderInfo = await client.getOrder(clobOrderId);
-              clobStatus = orderInfo?.status || '';
-              sizeMatched = orderInfo?.size_matched || '0';
+              if (!orderInfo) throw new Error('交易所未返回订单详情');
+              clobStatus = orderInfo.status || '';
+              sizeMatched = orderInfo.size_matched || '0';
               const matched = Number(sizeMatched);
-              const original = Number(orderInfo?.original_size || localOrder.size);
+              const original = Number(orderInfo.original_size || localOrder.size);
 
               if (clobStatus === 'CANCELED' || clobStatus === 'CANCELLED') {
                 newStatus = matched > 0 ? 'partial_cancelled' : 'cancelled';
@@ -617,27 +643,29 @@ export async function syncOrderStatus(): Promise<{
                 newStatus = 'filled';
               } else if (matched > 0) {
                 newStatus = 'partial';
-              } else {
-                newStatus = localOrder.order_status;
+              } else if (clobStatus === 'LIVE' || clobStatus === 'OPEN') {
+                // 即便批量挂单列表读取失败，精确查询已确认它仍在交易所挂着。
+                newStatus = 'open';
               }
-            } catch {
-              // getOrder 失败 → 不确定状态，保留当前状态
-              newStatus = localOrder.order_status;
+            } catch (err: any) {
+              // 精确查询失败时不猜订单已撤；明确回报未核验，保留本地状态。
+              unverifiedCount++;
+              clobStatus = `UNVERIFIED: ${err?.message || String(err)}`;
             }
           }
         }
       } else {
-        // 无 CLOB 订单 ID，用 token_id + side + price 匹配 trades
+        // 无 CLOB ID 只能用交易特征作有限匹配；没有成交记录则不能证明本地状态正确。
         const tradeKey = `${localOrder.token_id}_${localOrder.side}_${Number(localOrder.price).toFixed(4)}`;
-        const matchedTrades = tradesByKey.get(tradeKey);
+        const matchedTrades = tradesRead ? tradesByKey.get(tradeKey) : undefined;
 
         if (matchedTrades && matchedTrades.length > 0) {
           const totalMatched = matchedTrades.reduce((sum, t) => sum + Number(t.size || 0), 0);
           sizeMatched = String(totalMatched);
           newStatus = totalMatched >= Number(localOrder.size) ? 'filled' : 'partial';
         } else {
-          // 无匹配成交，保留当前状态
-          newStatus = localOrder.order_status;
+          unverifiedCount++;
+          clobStatus = tradesRead ? 'UNVERIFIED: 本地订单缺少 CLOB ID' : 'UNVERIFIED: 成交记录未读取';
         }
       }
 
@@ -660,15 +688,21 @@ export async function syncOrderStatus(): Promise<{
       }
     }
 
-    const apiNote = clobApiAvailable ? '' : ' (CLOB API 不可用，仅本地数据)';
-    const importNote = importedCount > 0 ? `, 导入 ${importedCount} 笔链上订单` : '';
+    const importNote = importedCount > 0 ? `，导入 ${importedCount} 笔链上订单` : '';
+    const unverifiedNote = unverifiedCount > 0 ? `，${unverifiedCount} 笔未核验` : '';
+    const partialSourceNote = !openOrdersRead || !tradesRead ? '（部分交易所数据未读取）' : '';
+    const truncationNote = tradesTruncated ? `（成交历史仅扫描最近 ${MAX_TRADE_SYNC_PAGES} 页）` : '';
     return {
       success: true,
-      message: `同步完成: 共 ${matchedCount} 个订单, ${updatedCount} 个状态已更新${importNote}${apiNote}`,
+      message: `同步完成：核对 ${matchedCount} 笔，更新 ${updatedCount} 笔${importNote}${unverifiedNote}${partialSourceNote}${truncationNote}`,
       total: matchedCount,
       matched: matchedCount,
       updated: updatedCount,
       imported: importedCount,
+      unverified: unverifiedCount,
+      ...sourceState,
+      openOrdersError,
+      tradesError,
       details,
     };
   } catch (err: any) {
@@ -676,7 +710,8 @@ export async function syncOrderStatus(): Promise<{
     return {
       success: false,
       message: errorMsg,
-      total: 0, matched: 0, updated: 0, imported: 0,
+      total: 0, matched: 0, updated: 0, imported: 0, unverified: 0,
+      openOrdersRead: false, tradesRead: false, tradesTruncated: false,
       details: [],
     };
   }

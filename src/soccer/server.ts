@@ -598,6 +598,12 @@ app.post('/api/soccer/orders/sync', asyncHandler(async (_req, res) => {
     matched: result.matched,
     updated: result.updated,
     imported: result.imported,
+    unverified: result.unverified,
+    openOrdersRead: result.openOrdersRead,
+    tradesRead: result.tradesRead,
+    tradesTruncated: result.tradesTruncated,
+    openOrdersError: result.openOrdersError,
+    tradesError: result.tradesError,
     details: result.details,
   });
 }));
@@ -2100,7 +2106,8 @@ app.post('/api/bots/price-bot/report/refresh', asyncHandler(async (_req, res) =>
     const orders = await syncOrderStatus().catch((err: unknown) => ({
       success: false,
       message: err instanceof Error ? err.message : String(err),
-      total: 0, matched: 0, updated: 0, imported: 0,
+      total: 0, matched: 0, updated: 0, imported: 0, unverified: 0,
+      openOrdersRead: false, tradesRead: false, tradesTruncated: false,
     }));
     const settlements = await syncSettlements().catch((err: unknown) => ({
       success: false,
@@ -2116,7 +2123,15 @@ app.post('/api/bots/price-bot/report/refresh', asyncHandler(async (_req, res) =>
       success: true,
       report,
       sync: {
-        orders: { updated: orders.updated ?? 0, imported: orders.imported ?? 0, message: orders.message },
+        orders: {
+          updated: orders.updated ?? 0,
+          imported: orders.imported ?? 0,
+          unverified: orders.unverified ?? 0,
+          openOrdersRead: orders.openOrdersRead ?? false,
+          tradesRead: orders.tradesRead ?? false,
+          tradesTruncated: orders.tradesTruncated ?? false,
+          message: orders.message,
+        },
         settlements: { settledCount: settlements.settledCount ?? 0, message: settlements.message },
         outcomes: {
           pending: outcomes.pending,

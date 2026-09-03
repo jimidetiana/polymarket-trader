@@ -33,7 +33,7 @@ export default function OrdersPage() {
   const [filter, setFilter] = useState<OrderFilter>('all')
   // 卖出弹窗。mode 决定默认走市价还是限价，价格两种模式都可改
   const [sellTarget, setSellTarget] = useState<{ pos: Position; mode: 'market' | 'limit' } | null>(null)
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null)
+  const [message, setMessage] = useState<{ text: string; error: boolean; warning?: boolean } | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [reconcile, setReconcile] = useState<ReconcileResult | null>(null)
   const [reconcileBusy, setReconcileBusy] = useState(false)
@@ -50,12 +50,14 @@ export default function OrdersPage() {
 
   // 挂单对账要打交易所，比本地查询慢得多，所以单独拉、单独转圈，
   // 不塞进 30s 的 loadData 里拖慢整页
-  const loadReconcile = useCallback(async () => {
+  const loadReconcile = useCallback(async (showError = true): Promise<boolean> => {
     setReconcileBusy(true)
     try {
       setReconcile(await fetchOrderReconcile())
+      return true
     } catch (err) {
-      setMessage({ text: `挂单对账失败：${err instanceof Error ? err.message : String(err)}`, error: true })
+      if (showError) setMessage({ text: `挂单对账失败：${err instanceof Error ? err.message : String(err)}`, error: true })
+      return false
     } finally {
       setReconcileBusy(false)
     }
@@ -79,10 +81,33 @@ export default function OrdersPage() {
     setSyncing(true)
     try {
       const result = await syncOrders()
-      const settleResult = await fetch('/api/soccer/orders/sync-settlements', { method: 'POST' }).then(r => r.json())
-      const msg = `${result.message}${settleResult.settledCount > 0 ? ` | ${settleResult.message}` : ''}`
-      setMessage({ text: msg, error: false })
-      await loadData()
+      const source = [
+        `挂单${result.openOrdersRead ? '已读取' : '未读取'}`,
+        `成交${result.tradesRead ? '已读取' : '未读取'}`,
+      ].join(' · ')
+      const warnings = [
+        result.unverified > 0 ? `${result.unverified} 笔未核验` : '',
+        result.tradesTruncated ? '成交历史只扫描到最近 10 页' : '',
+        !result.openOrdersRead && result.openOrdersError ? `挂单读取失败：${result.openOrdersError}` : '',
+        !result.tradesRead && result.tradesError ? `成交读取失败：${result.tradesError}` : '',
+      ].filter(Boolean)
+      let settlement = '结算：没有新结算'
+      try {
+        const settleResponse = await fetch('/api/soccer/orders/sync-settlements', { method: 'POST' })
+        const settleResult = await settleResponse.json()
+        if (!settleResponse.ok || !settleResult.success) throw new Error(settleResult.error || '结算同步失败')
+        settlement = `结算：${settleResult.settledCount > 0 ? `已结算 ${settleResult.settledCount} 笔` : '没有新结算'}`
+      } catch (err) {
+        warnings.push(`结算未同步：${err instanceof Error ? err.message : String(err)}`)
+      }
+      // 对账是独立缓存。停留在挂单管理时必须重新拉，不能继续显示同步前的结论。
+      const [, reconciled] = await Promise.all([loadData(), loadReconcile(false)])
+      if (!reconciled) warnings.push('挂单对账未刷新，请稍后点“重新对账”')
+      setMessage({
+        text: `${result.message}｜${source}｜${settlement}${warnings.length ? `｜注意：${warnings.join('；')}` : ''}`,
+        error: false,
+        warning: warnings.length > 0,
+      })
     } catch (err) {
       setMessage({ text: `同步失败：${err instanceof Error ? err.message : String(err)}`, error: true })
     } finally {
@@ -188,7 +213,9 @@ export default function OrdersPage() {
               'flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs',
               message.error
                 ? 'border-error/30 bg-error/10 text-error'
-                : 'border-success/30 bg-success/10 text-success',
+                : message.warning
+                  ? 'border-warning/30 bg-warning/10 text-warning'
+                  : 'border-success/30 bg-success/10 text-success',
             )}
           >
             <AlertCircle className="h-3.5 w-3.5 shrink-0" />

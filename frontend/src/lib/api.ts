@@ -118,8 +118,22 @@ export async function quickSell(tokenId: string, size: number, price: number, ty
   return data
 }
 
-export async function syncOrders(): Promise<{ message: string; total: number; matched: number; updated: number; imported: number }> {
-  const data = await request<{ message: string; total: number; matched: number; updated: number; imported: number }>(
+export interface OrderSyncResult {
+  message: string
+  total: number
+  matched: number
+  updated: number
+  imported: number
+  unverified: number
+  openOrdersRead: boolean
+  tradesRead: boolean
+  tradesTruncated: boolean
+  openOrdersError?: string
+  tradesError?: string
+}
+
+export async function syncOrders(): Promise<OrderSyncResult> {
+  const data = await request<OrderSyncResult>(
     '/api/soccer/orders/sync',
     { method: 'POST' },
   )
@@ -1423,7 +1437,15 @@ export async function fetchRealOrderReportLeagues(): Promise<Array<{ league: str
 }
 
 export interface RealOrderReportSync {
-  orders: { updated: number; imported: number; message?: string }
+  orders: {
+    updated: number
+    imported: number
+    unverified?: number
+    openOrdersRead?: boolean
+    tradesRead?: boolean
+    tradesTruncated?: boolean
+    message?: string
+  }
   settlements: { settledCount: number; message?: string }
   outcomes: { pending: number; resolved: number; stillOpen: number; notFound: number; failed: number }
 }
