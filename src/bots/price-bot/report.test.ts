@@ -73,6 +73,17 @@ test('filled exchange status with a rule outcome counts as settled, not open inv
   assert.equal(classifyFill('open', null), null)
 })
 
+test('order-level net subtracts losing fills instead of dropping them', () => {
+  const stats = aggregateOutcomeStats([
+    { orderId: 1, ruleId: 1, size: 10, price: 0.8, won: true },
+    { orderId: 2, ruleId: 2, size: 5, price: 0.9, won: false },
+  ], 'order')
+  assert.equal(stats.n, 2)
+  assert.equal(stats.wins, 1)
+  assert.ok(Math.abs(stats.invested - 12.5) < 1e-10)
+  assert.ok(Math.abs(stats.net - (2 - 4.5)) < 1e-10)
+})
+
 test('invalid or non-fill-like samples do not enter realized outcome totals', () => {
   const stats = aggregateOutcomeStats([
     { orderId: 1, ruleId: 1, size: 5, price: 0.8, won: true },

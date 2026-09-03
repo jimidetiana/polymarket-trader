@@ -1396,6 +1396,8 @@ export interface RealOrderReport {
     rules: number
     invested: number
     net: number
+    winPnl: number
+    losePnl: number
     cumulativeNet: number
   }>
   rows: RealOrderReportRow[]

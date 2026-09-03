@@ -80,7 +80,10 @@ export type ReportTimelinePoint = {
   orders: number
   rules: number
   invested: number
+  /** 当日已结算单的已实现净利，亏损为负。 */
   net: number
+  winPnl: number
+  losePnl: number
   cumulativeNet: number
 }
 
@@ -373,6 +376,14 @@ export async function fetchRealOrderReport(pool: Pool, filters: RealOrderReportF
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, values]) => {
       const stats = aggregateOutcomeStats(values, 'order')
+      let winPnl = 0
+      let losePnl = 0
+      for (const sample of values) {
+        if (!finite(sample.size) || sample.size <= 0 || !finite(sample.price) || sample.price <= 0 || sample.price >= 1) continue
+        const pnl = sample.won ? sample.size * (1 - sample.price) : -sample.size * sample.price
+        if (pnl >= 0) winPnl += pnl
+        else losePnl += pnl
+      }
       cumulativeNet += stats.net
       return {
         date,
@@ -380,6 +391,8 @@ export async function fetchRealOrderReport(pool: Pool, filters: RealOrderReportF
         rules: aggregateOutcomeStats(values, 'rule').n,
         invested: stats.invested,
         net: stats.net,
+        winPnl,
+        losePnl,
         cumulativeNet,
       }
     })

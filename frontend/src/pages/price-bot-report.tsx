@@ -136,7 +136,7 @@ export default function PriceBotReportPage() {
 
   const renderBody = () => {
     if (loading && !report) return <div className="py-20 text-center text-sm text-muted-foreground">正在加载实单数据…</div>
-    if (error) return <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">加载失败：{error}</div>
+    if (error) return <div className="rounded border border-error/40 bg-error/10 px-3 py-2 text-sm text-error">加载失败：{error}</div>
     if (!report) return null
 
     const { funnel, overall, kelly, byLeague, byMarket, byPriceBand, timeline, rows } = report
@@ -146,7 +146,7 @@ export default function PriceBotReportPage() {
     const submitted = funnel.submitted
     const submittedRate = submitted > 0 ? filledTotal / submitted : null
     const settledRate = filledTotal > 0 ? funnel.settled / filledTotal : null
-    const maxCumulative = Math.max(1, ...timeline.map(point => Math.abs(point.cumulativeNet)))
+    const maxDailyAbs = Math.max(1, ...timeline.map(point => Math.max(Math.abs(point.net), point.winPnl, Math.abs(point.losePnl))))
     const rowLimit = expanded.orders ? rows.length : 40
 
     return (
@@ -210,18 +210,50 @@ export default function PriceBotReportPage() {
         </section>
         <GroupTable title="按成交价格档（独立盘口）" groups={byPriceBand} />
 
-        <section className="rounded-md border bg-card p-3">
-          <div className="mb-3 text-sm font-medium">已实现净利时间线</div>
+        <section className="overflow-hidden rounded-md border bg-card">
+          <div className="border-b px-3 py-2">
+            <div className="text-sm font-medium">已实现盈亏时间线</div>
+            <div className="text-xs text-muted-foreground">当日净利 = 赢单兑现 − 输单本金；累计是把亏损扣进去之后的净值，不是只加赢单。</div>
+          </div>
           {timeline.length === 0 ? <div className="py-4 text-center text-sm text-muted-foreground">暂无已结算实单</div> : (
-            <div className="space-y-2">
-              {timeline.map(point => {
-                const width = Math.max(2, Math.abs(point.cumulativeNet) / maxCumulative * 100)
-                return <div key={point.date} className="grid grid-cols-[88px_1fr_110px] items-center gap-2 text-xs">
-                  <span className="text-muted-foreground">{point.date}</span>
-                  <div className="h-2 overflow-hidden rounded bg-muted"><div className={cn('h-full rounded', point.cumulativeNet >= 0 ? 'bg-success' : 'bg-destructive')} style={{ width: `${width}%` }} /></div>
-                  <span className={cn('text-right tabular-nums', point.cumulativeNet > 0 ? 'text-success' : point.cumulativeNet < 0 ? 'text-destructive' : '')}>{positive(point.cumulativeNet)}</span>
-                </div>
-              })}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[760px] text-left text-xs">
+                <thead className="bg-muted/50 text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">日期</th>
+                    <th className="px-3 py-2 text-right font-medium">单数</th>
+                    <th className="px-3 py-2 text-right font-medium">投入</th>
+                    <th className="px-3 py-2 text-right font-medium">赢单兑现</th>
+                    <th className="px-3 py-2 text-right font-medium">输单亏损</th>
+                    <th className="px-3 py-2 text-right font-medium">当日净利</th>
+                    <th className="px-3 py-2 font-medium">当日盈亏</th>
+                    <th className="px-3 py-2 text-right font-medium">累计净利</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {timeline.map(point => {
+                    const winWidth = Math.max(point.winPnl > 0 ? 2 : 0, point.winPnl / maxDailyAbs * 50)
+                    const loseWidth = Math.max(point.losePnl < 0 ? 2 : 0, Math.abs(point.losePnl) / maxDailyAbs * 50)
+                    return (
+                      <tr key={point.date} className="hover:bg-muted/30">
+                        <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{point.date}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{point.orders}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatUsdc(point.invested)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-success">{positive(point.winPnl)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-error">{positive(point.losePnl)}</td>
+                        <td className={cn('px-3 py-2 text-right tabular-nums font-medium', point.net > 0 ? 'text-success' : point.net < 0 ? 'text-error' : '')}>{positive(point.net)}</td>
+                        <td className="px-3 py-2">
+                          <div className="grid h-2 grid-cols-2 overflow-hidden rounded bg-muted">
+                            <div className="flex justify-end"><div className="h-full rounded-l bg-error" style={{ width: `${loseWidth}%` }} /></div>
+                            <div className="flex justify-start"><div className="h-full rounded-r bg-success" style={{ width: `${winWidth}%` }} /></div>
+                          </div>
+                        </td>
+                        <td className={cn('px-3 py-2 text-right tabular-nums', point.cumulativeNet > 0 ? 'text-success' : point.cumulativeNet < 0 ? 'text-error' : '')}>{positive(point.cumulativeNet)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </section>
@@ -241,10 +273,10 @@ export default function PriceBotReportPage() {
                   <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{formatBeijingTime(row.createdAt)}</td>
                   <td className="px-3 py-2"><div className="font-medium">{row.homeTeam || '—'} vs {row.awayTeam || '—'}</div><div className="text-muted-foreground">{row.league || '未标联赛'}</div></td>
                   <td className="px-3 py-2"><div>{row.marketName || row.marketType || '—'}</div><div className="text-muted-foreground">{row.marketType === 'total' ? `大小球 ${row.line ?? '—'}` : row.marketType || '—'} · {row.outcome}</div></td>
-                  <td className="px-3 py-2">{row.settledOutcome === 'yes' ? <span className="text-success">赢</span> : row.settledOutcome === 'no' ? <span className="text-destructive">输</span> : <span className="text-muted-foreground">未结算</span>}</td>
+                  <td className="px-3 py-2">{row.settledOutcome === 'yes' ? <span className="text-success">赢</span> : row.settledOutcome === 'no' ? <span className="text-error">输</span> : <span className="text-muted-foreground">未结算</span>}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.orderPrice > 0 ? row.orderPrice.toFixed(3) : '—'}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.orderSize > 0 ? formatNumber(row.orderSize) : '—'}</td>
-                  <td className={cn('px-3 py-2 text-right tabular-nums', (row.pnl ?? 0) > 0 ? 'text-success' : (row.pnl ?? 0) < 0 ? 'text-destructive' : '')}>{row.pnl == null ? '—' : positive(row.pnl)}</td>
+                  <td className={cn('px-3 py-2 text-right tabular-nums', (row.pnl ?? 0) > 0 ? 'text-success' : (row.pnl ?? 0) < 0 ? 'text-error' : '')}>{row.pnl == null ? '—' : positive(row.pnl)}</td>
                   <td className="px-3 py-2"><span className="rounded bg-muted px-1.5 py-0.5">{row.executionStatus}{row.settledOutcome && row.executionStatus === 'filled' ? ' · 规则已结算' : ''}</span></td>
                 </tr>)}
               </tbody>
