@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Activity, LayoutDashboard, Trophy, Languages, Moon, Sun, Wallet, Radio, Bot, ClipboardList, LineChart } from 'lucide-react'
+import { Activity, LayoutDashboard, Trophy, Languages, Moon, Sun, Wallet, Radio, Bot, ClipboardList, LineChart, BarChart3 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDarkMode } from '@/components/theme-provider'
 import { WalletBalance } from '@/components/wallet-balance'
@@ -22,6 +22,7 @@ export function Layout({ title, subtitle, children, actions }: LayoutProps) {
     { to: '/live', label: '赛事监听', icon: Radio },
     { to: '/value-bot', label: '价值机器人', icon: Bot },
     { to: '/price-bot', label: '价格监控', icon: LineChart },
+    { to: '/price-bot-report', label: '实单分析', icon: BarChart3 },
     { to: '/translations', label: '翻译', icon: Languages },
     { to: '/wallet', label: '钱包', icon: Wallet },
   ]

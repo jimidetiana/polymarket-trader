@@ -6,6 +6,7 @@ import WalletPage from '@/pages/wallet'
 import LiveMonitorPage from '@/pages/live-monitor'
 import ValueBotPage from '@/pages/value-bot'
 import PriceBotPage from '@/pages/price-bot'
+import PriceBotReportPage from '@/pages/price-bot-report'
 import OrdersPage from '@/pages/orders'
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
           <Route path="/live" element={<LiveMonitorPage />} />
           <Route path="/value-bot" element={<ValueBotPage />} />
           <Route path="/price-bot" element={<PriceBotPage />} />
+          <Route path="/price-bot-report" element={<PriceBotReportPage />} />
           <Route path="/translations" element={<TranslationsPage />} />
           <Route path="/wallet" element={<WalletPage />} />
           <Route path="*" element={<Navigate to="/soccer" replace />} />

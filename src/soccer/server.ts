@@ -78,6 +78,7 @@ import {
   cancelRestingBuyOrders,
 } from '../bots/price-bot/price-bot.js';
 import { syncRuleOutcomes } from '../bots/price-bot/outcome-sync.js';
+import { fetchRealOrderReport, listRealOrderReportLeagues } from '../bots/price-bot/report.js';
 import { config } from '../config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2055,6 +2056,32 @@ app.get('/api/bots/price-bot/connection/events', asyncHandler(async (req, res) =
 app.get('/api/bots/price-bot/connection/stats', asyncHandler(async (_req, res) => {
   const stats = await getConnectionStats();
   res.json({ success: true, stats, current: getConnectionState() });
+}));
+
+/**
+ * 真实成交分析：收益仅来自交易所已标记 filled/settled 且规则已回填结果的订单。
+ * placed 只是提交成功，skipped / failed / cancelled / partial 均不会混入实盘 P&L。
+ */
+app.get('/api/bots/price-bot/report', asyncHandler(async (req, res) => {
+  const line = req.query.line === undefined || req.query.line === '' ? undefined : Number(req.query.line);
+  if (line !== undefined && !Number.isFinite(line)) {
+    res.status(400).json({ success: false, error: '无效的盘口线 line' });
+    return;
+  }
+  const report = await fetchRealOrderReport(pool, {
+    league: typeof req.query.league === 'string' ? req.query.league : undefined,
+    marketType: typeof req.query.marketType === 'string' ? req.query.marketType : undefined,
+    line,
+    from: typeof req.query.from === 'string' ? req.query.from : undefined,
+    to: typeof req.query.to === 'string' ? req.query.to : undefined,
+  });
+  res.json({ success: true, report });
+}));
+
+/** 仅返回实际成交且已结算样本出现过的联赛，供实单分析筛选。 */
+app.get('/api/bots/price-bot/report/leagues', asyncHandler(async (_req, res) => {
+  const leagues = await listRealOrderReportLeagues(pool);
+  res.json({ success: true, leagues });
 }));
 
 // Static frontend in production/service mode; dev mode keeps API only.

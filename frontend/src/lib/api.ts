@@ -1313,6 +1313,113 @@ export async function fetchAutoOrders(params?: {
   )
 }
 
+// ==================== 实单分析 ====================
+// filled / settled 均以 soccer_orders.order_status 为准；placed 只表示提交成功。
+export interface RealOrderReportFilters {
+  league?: string
+  marketType?: string
+  line?: number
+  from?: string
+  to?: string
+}
+
+export interface OutcomeStats {
+  n: number
+  wins: number
+  winRate: number | null
+  winRateCI: [number, number] | null
+  invested: number
+  net: number
+  roi: number | null
+  averagePrice: number | null
+  decimalOdds: number | null
+}
+
+export interface ExecutionFunnel {
+  skipped: number
+  failed: number
+  submitted: number
+  cancelled: number
+  partial: number
+  filled: number
+  settled: number
+}
+
+export interface ReportGroup extends OutcomeStats {
+  key: string
+  label: string
+  kelly: number | null
+  sampleAdequate: boolean
+}
+
+export interface RealOrderReportRow {
+  id: number
+  ruleId: number
+  eventId: string
+  marketId: string
+  tokenId: string
+  createdAt: string
+  executionStatus: string
+  orderSize: number
+  orderPrice: number
+  settledOutcome: 'yes' | 'no' | null
+  outcome: string
+  league: string | null
+  homeTeam: string | null
+  awayTeam: string | null
+  marketName: string | null
+  marketType: string | null
+  line: number | null
+  pnl: number | null
+}
+
+export interface RealOrderReport {
+  funnel: ExecutionFunnel
+  overall: {
+    byRule: OutcomeStats
+    byOrder: OutcomeStats
+    unsettled: { n: number; invested: number }
+  }
+  kelly: {
+    point: number | null
+    conservative: number | null
+    fractional: number | null
+    requiredRules: number | null
+    sampleAdequate: boolean
+  }
+  byLeague: ReportGroup[]
+  byMarket: ReportGroup[]
+  byPriceBand: ReportGroup[]
+  timeline: Array<{
+    date: string
+    orders: number
+    rules: number
+    invested: number
+    net: number
+    cumulativeNet: number
+  }>
+  rows: RealOrderReportRow[]
+}
+
+export async function fetchRealOrderReport(filters: RealOrderReportFilters = {}): Promise<RealOrderReport> {
+  const query = new URLSearchParams()
+  if (filters.league) query.set('league', filters.league)
+  if (filters.marketType) query.set('marketType', filters.marketType)
+  if (filters.line !== undefined) query.set('line', String(filters.line))
+  if (filters.from) query.set('from', filters.from)
+  if (filters.to) query.set('to', filters.to)
+  const suffix = query.toString()
+  const data = await request<{ report: RealOrderReport }>(
+    `/api/bots/price-bot/report${suffix ? `?${suffix}` : ''}`,
+  )
+  return data.report
+}
+
+export async function fetchRealOrderReportLeagues(): Promise<Array<{ league: string; count: number }>> {
+  const data = await request<{ leagues: Array<{ league: string; count: number }> }>('/api/bots/price-bot/report/leagues')
+  return data.leagues
+}
+
 export async function stopPriceBotMonitor(ruleId: number): Promise<PriceMonitorState> {
   const data = await request<{ monitor: PriceMonitorState }>(`/api/bots/price-bot/monitors/${ruleId}/stop`, {
     method: 'POST',
