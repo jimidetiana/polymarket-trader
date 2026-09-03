@@ -1420,6 +1420,20 @@ export async function fetchRealOrderReportLeagues(): Promise<Array<{ league: str
   return data.leagues
 }
 
+export interface RealOrderReportSync {
+  orders: { updated: number; imported: number; message?: string }
+  settlements: { settledCount: number; message?: string }
+  outcomes: { pending: number; resolved: number; stillOpen: number; notFound: number; failed: number }
+}
+
+/** 先同步交易所订单/结算和规则 outcome，再返回最新报表。 */
+export async function refreshRealOrderReport(): Promise<{ report: RealOrderReport; sync: RealOrderReportSync }> {
+  return await request<{ report: RealOrderReport; sync: RealOrderReportSync }>(
+    '/api/bots/price-bot/report/refresh',
+    { method: 'POST' },
+  )
+}
+
 export async function stopPriceBotMonitor(ruleId: number): Promise<PriceMonitorState> {
   const data = await request<{ monitor: PriceMonitorState }>(`/api/bots/price-bot/monitors/${ruleId}/stop`, {
     method: 'POST',

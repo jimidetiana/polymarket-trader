@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   aggregateOutcomeStats,
+  classifyFill,
   computeKelly,
   wilsonInterval,
   type SettledSample,
@@ -59,6 +60,17 @@ test('rule aggregation keeps multiple actual orders in one rule as one outcome',
   assert.ok(Math.abs(byRule.invested - 5.0) < 1e-10)
   assert.ok(Math.abs(byRule.net) < 1e-10)
   assert.ok(Math.abs((byRule.averagePrice ?? 0) - 5 / 6) < 1e-10)
+})
+
+test('filled exchange status with a rule outcome counts as settled, not open inventory', () => {
+  assert.equal(classifyFill('filled', 'yes'), 'settled')
+  assert.equal(classifyFill('filled', 'no'), 'settled')
+  assert.equal(classifyFill('settled', 'yes'), 'settled')
+  assert.equal(classifyFill('filled', null), 'filled')
+  assert.equal(classifyFill('settled', null), 'filled')
+  assert.equal(classifyFill('cancelled', 'yes'), 'cancelled')
+  assert.equal(classifyFill('partial', 'yes'), 'partial')
+  assert.equal(classifyFill('open', null), null)
 })
 
 test('invalid or non-fill-like samples do not enter realized outcome totals', () => {

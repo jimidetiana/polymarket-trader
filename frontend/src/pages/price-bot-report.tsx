@@ -6,6 +6,7 @@ import { cn, formatUsdc, formatPercent, formatNumber } from '@/lib/utils'
 import {
   fetchRealOrderReport,
   fetchRealOrderReportLeagues,
+  refreshRealOrderReport,
   type RealOrderReportFilters,
   type RealOrderReport,
   type ReportGroup,
@@ -80,6 +81,9 @@ export default function PriceBotReportPage() {
   const [leagueOptions, setLeagueOptions] = useState<string[]>([])
   const [filters, setFilters] = useState<RealOrderReportFilters>({})
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [syncing, setSyncing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null)
+  const [syncNote, setSyncNote] = useState<string | null>(null)
 
   const loadLeagues = useCallback(async () => {
     try {
@@ -90,17 +94,35 @@ export default function PriceBotReportPage() {
     }
   }, [])
 
-  const loadReport = useCallback(async () => {
-    setLoading(true)
+  const loadReport = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     setError(null)
     try {
       setReport(await fetchRealOrderReport(filters))
+      setLastUpdated(new Date().toISOString())
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [filters])
+
+  const syncAndLoad = useCallback(async () => {
+    setSyncing(true)
+    setError(null)
+    try {
+      const result = await refreshRealOrderReport()
+      setReport(await fetchRealOrderReport(filters))
+      setLastUpdated(new Date().toISOString())
+      const { outcomes, settlements, orders } = result.sync
+      setSyncNote(`回填 ${outcomes.resolved} 条规则结果 · 交易所结算 ${settlements.settledCount} · 订单更新 ${orders.updated + orders.imported}`)
+      void loadLeagues()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSyncing(false)
+    }
+  }, [filters, loadLeagues])
 
   useEffect(() => {
     void loadLeagues()
@@ -108,6 +130,8 @@ export default function PriceBotReportPage() {
 
   useEffect(() => {
     void loadReport()
+    const timer = setInterval(() => { void loadReport(true) }, 30000)
+    return () => clearInterval(timer)
   }, [loadReport])
 
   const renderBody = () => {
@@ -136,8 +160,8 @@ export default function PriceBotReportPage() {
               ['已提交', submitted, 'API 接单，不等于成交'],
               ['已取消', funnel.cancelled, '交易所未成交'],
               ['部分成交', funnel.partial, '成交份数未持久化'],
-              ['已成交（持仓）', funnel.filled, '已成交，等待结算'],
-              ['已结算', funnel.settled, '计入已实现收益'],
+              ['已成交未回填', funnel.filled, '成交了，规则还没有结算结果'],
+              ['已结算', funnel.settled, '规则已回填结果，计入收益'],
             ].map(([label, count, hint]) => (
               <div key={String(label)} className="rounded border bg-muted/20 p-2">
                 <div className="text-xs text-muted-foreground">{label}</div>
@@ -177,7 +201,8 @@ export default function PriceBotReportPage() {
           </div>
         </section>
 
-        {overall.unsettled.n > 0 && <div className="rounded border border-primary/30 bg-primary/5 px-3 py-2 text-sm">另有 {overall.unsettled.n} 笔已成交持仓尚未回填结算，投入 {formatUsdc(overall.unsettled.invested)}，未混入收益或胜率。</div>}
+        {overall.unsettled.n > 0 && <div className="rounded border border-primary/30 bg-primary/5 px-3 py-2 text-sm">另有 {overall.unsettled.n} 笔已成交、规则尚未回填结果，投入 {formatUsdc(overall.unsettled.invested)}，未混入收益或胜率。点「同步结算」会向 Gamma 回填。</div>}
+        {syncNote && <div className="text-xs text-muted-foreground">{syncNote}</div>}
 
         <section className="grid gap-3 xl:grid-cols-2">
           <GroupTable title="按联赛（独立盘口）" groups={byLeague} />
@@ -203,7 +228,7 @@ export default function PriceBotReportPage() {
 
         <section className="overflow-hidden rounded-md border bg-card">
           <div className="flex items-center justify-between border-b px-3 py-2">
-            <div><div className="text-sm font-medium">实单明细</div><div className="text-xs text-muted-foreground">价格和状态来自交易所订单记录；仅有已结算的完整成交单显示盈亏。</div></div>
+            <div><div className="text-sm font-medium">实单明细</div><div className="text-xs text-muted-foreground">只列交易所订单。交易所可能仍显示 filled，但规则已回填结果的会算进已结算，不是持仓。</div></div>
             <span className="text-xs text-muted-foreground">{rows.length} 条</span>
           </div>
           <div className="overflow-x-auto">
@@ -220,7 +245,7 @@ export default function PriceBotReportPage() {
                   <td className="px-3 py-2 text-right tabular-nums">{row.orderPrice > 0 ? row.orderPrice.toFixed(3) : '—'}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.orderSize > 0 ? formatNumber(row.orderSize) : '—'}</td>
                   <td className={cn('px-3 py-2 text-right tabular-nums', (row.pnl ?? 0) > 0 ? 'text-success' : (row.pnl ?? 0) < 0 ? 'text-destructive' : '')}>{row.pnl == null ? '—' : positive(row.pnl)}</td>
-                  <td className="px-3 py-2"><span className="rounded bg-muted px-1.5 py-0.5">{row.executionStatus}</span></td>
+                  <td className="px-3 py-2"><span className="rounded bg-muted px-1.5 py-0.5">{row.executionStatus}{row.settledOutcome && row.executionStatus === 'filled' ? ' · 规则已结算' : ''}</span></td>
                 </tr>)}
               </tbody>
             </table>
@@ -237,8 +262,12 @@ export default function PriceBotReportPage() {
     <Layout title="实单分析" subtitle="仅统计交易所真实成交，按独立盘口评估胜率与凯莉">
       <div className="mx-auto flex max-w-[1600px] flex-col gap-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3"><Link to="/price-bot" className="rounded border p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" title="返回价格监控"><ArrowLeft className="h-4 w-4" /></Link><div><h2 className="text-base font-semibold">价格监控 · 实单统计</h2><p className="text-xs text-muted-foreground">不将 skipped、submitted 或假设成交计入收益。</p></div></div>
-          <button onClick={() => void loadReport()} disabled={loading} className="inline-flex items-center gap-1.5 rounded border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"><RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />刷新</button>
+          <div className="flex items-center gap-3"><Link to="/price-bot" className="rounded border p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" title="返回价格监控"><ArrowLeft className="h-4 w-4" /></Link><div><h2 className="text-base font-semibold">价格监控 · 实单统计</h2><p className="text-xs text-muted-foreground">每 30 秒读库刷新；点同步会回填规则结算并拉交易所状态。不将 skipped、submitted 或假设成交计入收益。</p></div></div>
+          <div className="flex items-center gap-2">
+            {lastUpdated && <span className="text-xs text-muted-foreground">更新于 {formatBeijingTime(lastUpdated)}</span>}
+            <button onClick={() => void loadReport()} disabled={loading || syncing} className="inline-flex items-center gap-1.5 rounded border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"><RefreshCw className={cn('h-3.5 w-3.5', loading && !syncing && 'animate-spin')} />重读</button>
+            <button onClick={() => void syncAndLoad()} disabled={loading || syncing} className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary/10 px-3 py-1.5 text-sm text-primary hover:bg-primary/15 disabled:opacity-50"><RefreshCw className={cn('h-3.5 w-3.5', syncing && 'animate-spin')} />同步结算</button>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2 rounded border bg-card p-2">
           <select value={filters.league ?? ''} onChange={e => setFilters(prev => ({ ...prev, league: e.target.value || undefined }))} className="rounded border bg-background px-2 py-1.5 text-xs"><option value="">全部联赛</option>{leagueOptions.map(league => <option key={league} value={league}>{league}</option>)}</select>

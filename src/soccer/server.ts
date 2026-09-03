@@ -2084,6 +2084,54 @@ app.get('/api/bots/price-bot/report/leagues', asyncHandler(async (_req, res) => 
   res.json({ success: true, leagues });
 }));
 
+let reportRefreshBusy = false;
+
+/**
+ * 手动刷新：先同步交易所订单/结算，再回填规则 outcome，最后返回最新报表。
+ * GET /report 只读本地库；测试期间点刷新才会打 Gamma。
+ */
+app.post('/api/bots/price-bot/report/refresh', asyncHandler(async (_req, res) => {
+  if (reportRefreshBusy) {
+    res.status(429).json({ success: false, error: '正在同步，请稍后再试' });
+    return;
+  }
+  reportRefreshBusy = true;
+  try {
+    const orders = await syncOrderStatus().catch((err: unknown) => ({
+      success: false,
+      message: err instanceof Error ? err.message : String(err),
+      total: 0, matched: 0, updated: 0, imported: 0,
+    }));
+    const settlements = await syncSettlements().catch((err: unknown) => ({
+      success: false,
+      message: err instanceof Error ? err.message : String(err),
+      settledCount: 0,
+    }));
+    const outcomes = await syncRuleOutcomes(200).catch((err: unknown) => ({
+      pending: 0, resolved: 0, stillOpen: 0, notFound: 0, failed: 1,
+      details: [{ ruleId: 0, status: err instanceof Error ? err.message : String(err) }],
+    }));
+    const report = await fetchRealOrderReport(pool);
+    res.json({
+      success: true,
+      report,
+      sync: {
+        orders: { updated: orders.updated ?? 0, imported: orders.imported ?? 0, message: orders.message },
+        settlements: { settledCount: settlements.settledCount ?? 0, message: settlements.message },
+        outcomes: {
+          pending: outcomes.pending,
+          resolved: outcomes.resolved,
+          stillOpen: outcomes.stillOpen,
+          notFound: outcomes.notFound,
+          failed: outcomes.failed,
+        },
+      },
+    });
+  } finally {
+    reportRefreshBusy = false;
+  }
+}));
+
 // Static frontend in production/service mode; dev mode keeps API only.
 if (!isDev) {
   app.use(express.static(FRONTEND_DIST));
@@ -2169,6 +2217,20 @@ const server = app.listen(PORT, async () => {
   // 启动时同步一次订单状态，之后每 30 秒自动同步
   runOrderSync();
   setInterval(runOrderSync, 30 * 1000);
+
+  // 规则结算真相不在 soccer_orders 上；每 5 分钟回填一次，报表漏斗才不会把已结算单当成持仓。
+  async function runOutcomeSync() {
+    try {
+      const result = await syncRuleOutcomes(200);
+      if (result.resolved > 0 || result.failed > 0) {
+        console.log(`[OutcomeSync] pending=${result.pending} resolved=${result.resolved} open=${result.stillOpen} failed=${result.failed}`);
+      }
+    } catch (err) {
+      console.error('[OutcomeSync] 规则结算回填失败:', err);
+    }
+  }
+  runOutcomeSync();
+  setInterval(runOutcomeSync, 5 * 60 * 1000);
 
   // 价格机器人自恢复
   await restorePriceBot();

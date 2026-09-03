@@ -206,6 +206,22 @@ export function requiredRulesForConfidence(stats: OutcomeStats): number | null {
   return Math.ceil((Z_95 * Math.sqrt(stats.winRate * (1 - stats.winRate)) / edge) ** 2)
 }
 
+export type FillBucket = 'cancelled' | 'partial' | 'filled' | 'settled'
+
+/**
+ * 漏斗后半段以规则结算为准：soccer_orders 经常停在 filled，
+ * 但 price_bot_rules.settled_outcome 已经回填。那些单不是持仓。
+ */
+export function classifyFill(
+  orderStatus: string,
+  settledOutcome: string | null | undefined,
+): FillBucket | null {
+  if (orderStatus === 'cancelled') return 'cancelled'
+  if ((PARTIAL_ORDER_STATUSES as readonly string[]).includes(orderStatus)) return 'partial'
+  if (!(FILLED_ORDER_STATUSES as readonly string[]).includes(orderStatus)) return null
+  return settledOutcome === 'yes' || settledOutcome === 'no' ? 'settled' : 'filled'
+}
+
 function priceBand(price: number): { key: string; label: string } {
   if (price < 0.7) return { key: 'under-0.70', label: '< 0.70' }
   if (price < 0.8) return { key: '0.70-0.79', label: '0.70–0.79' }
@@ -289,28 +305,31 @@ export async function fetchRealOrderReport(pool: Pool, filters: RealOrderReportF
     else if (botStatus === 'failed') funnel.failed++
     else if (botStatus === 'placed') funnel.submitted++
 
-    if (executionStatus === 'cancelled') funnel.cancelled++
-    else if ((PARTIAL_ORDER_STATUSES as readonly string[]).includes(executionStatus)) funnel.partial++
-    else if (executionStatus === 'filled') funnel.filled++
-    else if (executionStatus === 'settled') funnel.settled++
+    const outcome = raw.settled_outcome === 'yes' || raw.settled_outcome === 'no' ? raw.settled_outcome : null
+    const fillBucket = classifyFill(executionStatus, outcome)
+    if (fillBucket === 'cancelled') funnel.cancelled++
+    else if (fillBucket === 'partial') funnel.partial++
+    else if (fillBucket === 'filled') funnel.filled++
+    else if (fillBucket === 'settled') funnel.settled++
 
     const size = Number(raw.order_size)
     const price = Number(raw.order_price)
     const isRealFill = (FILLED_ORDER_STATUSES as readonly string[]).includes(executionStatus)
-    const outcome = raw.settled_outcome === 'yes' || raw.settled_outcome === 'no' ? raw.settled_outcome : null
     const pnl = isRealFill && outcome && finite(size) && finite(price)
       ? outcome === 'yes' ? size * (1 - price) : -size * price
       : null
     const homeTeam = raw.home_team_zh || raw.home_team_en || null
     const awayTeam = raw.away_team_zh || raw.away_team_en || null
-    rows.push({
-      id: Number(raw.id), ruleId: Number(raw.rule_id), eventId: String(raw.event_id), marketId: String(raw.market_id),
-      tokenId: String(raw.token_id), createdAt: normalizeDate(raw.order_created_at ?? raw.bot_created_at),
-      executionStatus: executionStatus || botStatus, orderSize: finite(size) ? size : 0, orderPrice: finite(price) ? price : 0,
-      settledOutcome: outcome, outcome: String(raw.outcome), league: raw.league ?? null, homeTeam, awayTeam,
-      marketName: raw.question_zh || raw.question_en || null, marketType: raw.market_type ?? null,
-      line: raw.line == null ? null : Number(raw.line), pnl,
-    })
+    if (executionStatus) {
+      rows.push({
+        id: Number(raw.id), ruleId: Number(raw.rule_id), eventId: String(raw.event_id), marketId: String(raw.market_id),
+        tokenId: String(raw.token_id), createdAt: normalizeDate(raw.order_created_at ?? raw.bot_created_at),
+        executionStatus, orderSize: finite(size) ? size : 0, orderPrice: finite(price) ? price : 0,
+        settledOutcome: outcome, outcome: String(raw.outcome), league: raw.league ?? null, homeTeam, awayTeam,
+        marketName: raw.question_zh || raw.question_en || null, marketType: raw.market_type ?? null,
+        line: raw.line == null ? null : Number(raw.line), pnl,
+      })
+    }
 
     if (!isRealFill || !finite(size) || !finite(price) || size <= 0 || price <= 0 || price >= 1) continue
     if (!outcome) {
