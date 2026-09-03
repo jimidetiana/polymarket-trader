@@ -37,6 +37,20 @@ export function formatTime(iso: string | null | undefined): string {
   })
 }
 
+/**
+ * 完整的北京时间（年月日时分秒），约定同 formatTime。
+ *
+ * 单独一个函数是因为明细表要看到秒；不要在页面里另写一份——
+ * 漏掉给裸字符串补 `Z` 就会把 UTC 时钟当成北京时间显示，整整差 8 小时。
+ */
+export function formatBeijingDateTime(value: string | null | undefined): string {
+  if (!value) return '—'
+  const normalized = value.includes(' ') ? `${value.replace(' ', 'T')}Z` : value
+  const d = new Date(normalized)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+}
+
 export function formatPercent(price: number | null | undefined): string {
   if (price === null || price === undefined || Number.isNaN(price)) return '--'
   return `${(price * 100).toFixed(1)}%`

@@ -6,7 +6,7 @@ import {
   ShoppingCart, ShieldAlert, CheckCircle2,
 } from 'lucide-react'
 import { Layout } from '@/components/layout'
-import { cn } from '@/lib/utils'
+import { cn, formatBeijingDateTime } from '@/lib/utils'
 import { fetchEvents, fetchEventMarkets } from '@/lib/api'
 import type { SoccerEvent, SoccerMarket } from '@/types'
 import {
@@ -45,19 +45,8 @@ import {
   type AutoOrderRecord,
 } from '@/lib/api'
 
-/**
- * 统一按北京时间显示时间戳。
- *
- * 后端返回的是带 Z 的 UTC ISO 串（见 price-bot/db.ts 的 toIsoUtc）。
- * 这里显式指定 Asia/Shanghai，不依赖浏览器所在时区，
- * 保证任何机器上看到的都是北京时间。
- */
-function formatBeijingTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  const d = new Date(value)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-}
+/** 统一按北京时间显示时间戳，实现见 lib/utils 的 formatBeijingDateTime。 */
+const formatBeijingTime = formatBeijingDateTime
 
 const RULE_TYPE_LABELS: Record<string, string> = {
   percent_change: '百分比变化',

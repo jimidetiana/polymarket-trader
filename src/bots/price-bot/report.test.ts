@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   aggregateOutcomeStats,
+  beijingDate,
   classifyFill,
   computeKelly,
   wilsonInterval,
@@ -82,6 +83,14 @@ test('order-level net subtracts losing fills instead of dropping them', () => {
   assert.equal(stats.wins, 1)
   assert.ok(Math.abs(stats.invested - 12.5) < 1e-10)
   assert.ok(Math.abs(stats.net - (2 - 4.5)) < 1e-10)
+})
+
+test('beijingDate buckets UTC timestamps onto the Asia/Shanghai calendar day', () => {
+  assert.equal(beijingDate('2026-09-03T08:44:00.000Z'), '2026-09-03')
+  assert.equal(beijingDate('2026-09-03 08:44:00'), '2026-09-03')
+  assert.equal(beijingDate('2026-09-02T16:00:00.000Z'), '2026-09-03')
+  assert.equal(beijingDate('2026-09-02T15:59:59.000Z'), '2026-09-02')
+  assert.equal(beijingDate(new Date('2026-09-03T16:00:00.000Z')), '2026-09-04')
 })
 
 test('invalid or non-fill-like samples do not enter realized outcome totals', () => {

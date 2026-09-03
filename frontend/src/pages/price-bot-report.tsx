@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowLeft, RefreshCw, ChevronDown, BarChart3 } from 'lucide-react'
 import { Layout } from '@/components/layout'
-import { cn, formatUsdc, formatPercent, formatNumber } from '@/lib/utils'
+import { cn, formatUsdc, formatPercent, formatNumber, formatBeijingDateTime } from '@/lib/utils'
 import {
   fetchRealOrderReport,
   fetchRealOrderReportLeagues,
@@ -12,12 +12,7 @@ import {
   type ReportGroup,
 } from '@/lib/api'
 
-function formatBeijingTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  const d = new Date(value)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-}
+const formatBeijingTime = formatBeijingDateTime
 
 function positive(value: number): string {
   return `${value >= 0 ? '+' : ''}${formatUsdc(value)}`
@@ -213,7 +208,7 @@ export default function PriceBotReportPage() {
         <section className="overflow-hidden rounded-md border bg-card">
           <div className="border-b px-3 py-2">
             <div className="text-sm font-medium">已实现盈亏时间线</div>
-            <div className="text-xs text-muted-foreground">当日净利 = 赢单兑现 − 输单本金；累计是把亏损扣进去之后的净值，不是只加赢单。</div>
+            <div className="text-xs text-muted-foreground">按北京日期切天，与明细同一套。当日净利 = 赢单兑现 − 输单本金；累计是把亏损扣进去之后的净值，不是只加赢单。只含 goal_surge 大小球/谁先进球，不含让分或胜负。</div>
           </div>
           {timeline.length === 0 ? <div className="py-4 text-center text-sm text-muted-foreground">暂无已结算实单</div> : (
             <div className="overflow-x-auto">

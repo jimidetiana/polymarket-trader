@@ -10,6 +10,18 @@ import type { Pool } from 'mysql2/promise'
 export const FILLED_ORDER_STATUSES = ['filled', 'settled'] as const
 export const PARTIAL_ORDER_STATUSES = ['partial', 'partial_cancelled'] as const
 
+/**
+ * 时区陷阱：这两张表的 `created_at` 不在同一个时区，同一笔单差 8 小时。
+ *
+ *   soccer_orders.created_at    → 北京时间（写入时用了本地时钟）
+ *   price_bot_orders.created_at → UTC
+ *
+ * 连接池是 `timezone: 'Z'` + `dateStrings: true`，驱动不做换算、原样给裸字符串，
+ * 所以哪一列该补 8 小时只能靠这条约定。查询里一律先归一成带 Z 的 UTC ISO 再出去，
+ * 别在 JS 侧对裸字符串二次猜测。
+ */
+export const BEIJING_STORED_COLUMNS = ['soccer_orders.created_at'] as const
+
 export type RealOrderReportFilters = {
   league?: string
   marketType?: string
@@ -260,14 +272,36 @@ function normalizeDate(value: unknown): string {
   return String(value ?? '')
 }
 
+/**
+ * 把 UTC 时间戳切成北京日历日。时间线、日期筛选跟明细同一套，
+ * 避免 UTC 切天把北京 08:00 之后的单算进“前一天”。
+ *
+ * 入参必须已经是 UTC（查询里已归一成带 Z 的 ISO，见 [[BEIJING_STORED_COLUMNS]]）。
+ * 裸字符串按 UTC 解析——直接喂 soccer_orders 的原始值会多算 8 小时。
+ */
+export function beijingDate(value: unknown): string {
+  const raw = normalizeDate(value)
+  if (!raw) return ''
+  const normalized = raw.includes('T') || /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)
+    ? raw
+    : raw.includes(' ')
+      ? `${raw.replace(' ', 'T')}Z`
+      : raw
+  const d = new Date(normalized)
+  if (Number.isNaN(d.getTime())) return raw.slice(0, 10)
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
+}
+
 function queryFilter(filters: RealOrderReportFilters, alias = 'o'): { where: string[]; params: any[] } {
   const where: string[] = ["r.rule_type = 'goal_surge'"]
   const params: any[] = []
   if (filters.league) { where.push('e.league = ?'); params.push(filters.league) }
   if (filters.marketType) { where.push('m.market_type = ?'); params.push(filters.marketType) }
   if (filters.line != null && Number.isFinite(filters.line)) { where.push('m.line = ?'); params.push(filters.line) }
-  if (filters.from) { where.push(`${alias}.created_at >= ?`); params.push(filters.from) }
-  if (filters.to) { where.push(`${alias}.created_at < DATE_ADD(?, INTERVAL 1 DAY)`); params.push(filters.to) }
+  // s.created_at 已经是北京时间，o.created_at 是 UTC；筛选按北京日历日，两列各自换算。
+  const beijingDay = `COALESCE(DATE(s.created_at), DATE(CONVERT_TZ(${alias}.created_at, '+00:00', '+08:00')))`
+  if (filters.from) { where.push(`${beijingDay} >= ?`); params.push(filters.from) }
+  if (filters.to) { where.push(`${beijingDay} <= ?`); params.push(filters.to) }
   return { where, params }
 }
 
@@ -279,10 +313,14 @@ export async function fetchRealOrderReport(pool: Pool, filters: RealOrderReportF
   const { where, params } = queryFilter(filters)
   const whereSql = where.join(' AND ')
 
+  // 两张表的时间戳时区不同（见 BEIJING_STORED_COLUMNS 注释），在 SQL 里就归一成带 Z 的 UTC ISO，
+  // 出了这个查询之后只有一种口径。
   const [rawRows] = await pool.execute<any[]>(
     `SELECT o.id, o.rule_id, o.event_id, o.market_id, o.token_id, o.outcome,
-            o.status AS bot_status, o.created_at AS bot_created_at,
-            s.order_status, s.size AS order_size, s.price AS order_price, s.created_at AS order_created_at,
+            o.status AS bot_status,
+            DATE_FORMAT(o.created_at, '%Y-%m-%dT%H:%i:%sZ') AS bot_created_at,
+            s.order_status, s.size AS order_size, s.price AS order_price,
+            DATE_FORMAT(CONVERT_TZ(s.created_at, '+08:00', '+00:00'), '%Y-%m-%dT%H:%i:%sZ') AS order_created_at,
             r.settled_outcome,
             e.league, e.home_team_zh, e.away_team_zh, e.home_team_en, e.away_team_en,
             m.question_zh, m.question_en, m.market_type, m.line
@@ -348,7 +386,7 @@ export async function fetchRealOrderReport(pool: Pool, filters: RealOrderReportF
       orderId: Number(raw.id), ruleId: Number(raw.rule_id), size, price, won: outcome === 'yes',
       league: raw.league || '未标联赛', marketKey: `${raw.market_type ?? 'unknown'}:${raw.line ?? ''}`,
       marketLabel, bandKey: band.key, bandLabel: band.label,
-      date: normalizeDate(raw.order_created_at ?? raw.bot_created_at).slice(0, 10),
+      date: beijingDate(raw.order_created_at ?? raw.bot_created_at),
     })
   }
 
