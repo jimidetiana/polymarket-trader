@@ -148,6 +148,30 @@ async function doEnsureTables(): Promise<void> {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
 
+  // 初盘大小球梯度快照表。
+  //
+  // 为什么不能直接读 soccer_markets.outcome_prices：那一列是**实时价**，
+  // 每轮同步都被覆盖。进球后它会抬到 0.9+，结算后到 0.99（实测塞尔塔
+  // Over 1.5 读到 0.9995）。而下一档开档决策要的恰恰是「开哨时这档多少钱」——
+  // 拿实时价去当初盘，等于用结论去推导前提。
+  //
+  // 所以在赛前（match_status=not_started）抓一次就不再改：写入用 INSERT IGNORE，
+  // 首次写入即定稿。uk 上带 line，一场比赛的每个档位各一行。
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS price_bot_line_snapshots (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      event_id VARCHAR(100) NOT NULL,
+      market_id VARCHAR(100) NOT NULL,
+      line DECIMAL(6,2) NOT NULL COMMENT '总进球线 0.5/1.5/2.5/3.5/4.5',
+      over_price DECIMAL(8,4) DEFAULT NULL COMMENT '开哨时 Over 的价格',
+      best_bid DECIMAL(8,4) DEFAULT NULL,
+      best_ask DECIMAL(8,4) DEFAULT NULL,
+      captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_event_line (event_id, line),
+      KEY idx_event (event_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+
   // 连接事件表：记录 WS 断开/重连，用于验证断联与进球的相关性
   await pool.execute(`
     CREATE TABLE IF NOT EXISTS price_bot_connection_events (
@@ -1289,6 +1313,64 @@ function rowToLog(row: any): PriceBotLog {
     loggedAt: toIsoUtc(row.logged_at),
     ...extractContext(row),
   }
+}
+
+// ==================== 初盘梯度快照 ====================
+
+/** 一场比赛某个总进球档位的开哨价 */
+export interface LineSnapshot {
+  eventId: string
+  marketId: string
+  line: number
+  overPrice: number | null
+  bestBid: number | null
+  bestAsk: number | null
+  capturedAt?: string
+}
+
+/**
+ * 写入初盘快照。**首次写入即定稿**，重复调用不覆盖。
+ *
+ * 用 INSERT IGNORE 而不是 upsert 是这张表的核心语义：赛前抓到的那一次
+ * 才是初盘，之后任何一次「顺手更新」都会把它污染成实时价。
+ * 返回真正落库的行数，便于调用方报告抓到几档。
+ */
+export async function saveLineSnapshots(rows: LineSnapshot[]): Promise<number> {
+  if (rows.length === 0) return 0
+  await ensureTables()
+  let inserted = 0
+  for (const r of rows) {
+    const [res] = await pool.execute<any>(
+      `INSERT IGNORE INTO price_bot_line_snapshots
+         (event_id, market_id, line, over_price, best_bid, best_ask, captured_at)
+       VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
+      [r.eventId, r.marketId, r.line, r.overPrice, r.bestBid, r.bestAsk],
+    )
+    inserted += Number(res?.affectedRows ?? 0)
+  }
+  return inserted
+}
+
+/** 读一场比赛的初盘梯度，键是档位线 */
+export async function getLineSnapshots(eventId: string): Promise<Map<number, LineSnapshot>> {
+  await ensureTables()
+  const [rows] = await pool.execute<any[]>(
+    `SELECT * FROM price_bot_line_snapshots WHERE event_id = ?`,
+    [eventId],
+  )
+  const map = new Map<number, LineSnapshot>()
+  for (const row of rows) {
+    map.set(Number(row.line), {
+      eventId: String(row.event_id),
+      marketId: String(row.market_id),
+      line: Number(row.line),
+      overPrice: row.over_price != null ? Number(row.over_price) : null,
+      bestBid: row.best_bid != null ? Number(row.best_bid) : null,
+      bestAsk: row.best_ask != null ? Number(row.best_ask) : null,
+      capturedAt: toIsoUtc(row.captured_at),
+    })
+  }
+  return map
 }
 
 function rowToConnectionEvent(row: any): PriceBotConnectionEvent {

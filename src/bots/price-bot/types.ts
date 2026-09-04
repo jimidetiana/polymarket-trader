@@ -465,6 +465,18 @@ export interface PriceMonitorState {
   preVolatileBid?: number | null
   /** goal_surge：已发买入信号、待「价格稳定在 confirmMin」事后确认 */
   pendingConfirm?: { signalTime: number; holdStartedAt?: number } | null
+  /**
+   * goal_surge：买入信号静默截止（毫秒时间戳）。到点之前不评估进球信号。
+   *
+   * 为「完结上一档、开下一档」那一刻服务。进球瞬间**所有**档位同涨
+   * （0 球进 1 球时 Over 3.5 也会从 0.05 抬到 0.09），刚建的下一档一上线
+   * 就看到一段陡涨，于是立刻发买入信号——但那段涨幅属于**刚打出的上一档**，
+   * 不是这一档的进球。实测亏损单多是这个形态（按 0.85~0.90 接一条未打出的线）。
+   *
+   * 静默只压住「买」，不压住「看」：采样、日志、断联统计照常，
+   * 所以静默期内的价格路径仍然完整落库，事后能复盘那波余震。
+   */
+  surgeMutedUntil?: number
 }
 
 // ==================== 监控日志 ====================

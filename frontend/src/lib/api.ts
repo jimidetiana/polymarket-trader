@@ -1211,8 +1211,27 @@ export async function quickCreatePriceBotRules(): Promise<QuickCreateResult> {
 export interface SettleRuleResult {
   success: boolean
   settled: { ruleId: number; line: number | null }
-  next: null | { ruleId: number; marketId: string; line: number; outcome: string; started: boolean }
+  next: null | {
+    ruleId: number; marketId: string; line: number; outcome: string; started: boolean
+    /** 开档后的买入静默毫秒数，期间不会触发进球买入信号 */
+    mutedMs: number
+  }
   reason?: string
+  /**
+   * 开档决策详情。递进不再无条件：下一档是否值得开由初盘反推的公平价决定，
+   * 而「能不能买」是另一件事——buyBlockedReason 非空表示此刻不该授权下单。
+   */
+  decision?: {
+    reasonCode:
+      | 'no_next_line' | 'score_behind' | 'no_snapshot' | 'thin_book'
+      | 'cheap_kickoff' | 'low_fair_prob' | 'shadow_hot' | 'ok'
+    nextLine: number | null
+    lambdaFull: number | null
+    fairProb: number | null
+    marketPrice: number | null
+    goalsNeeded: number | null
+    buyBlockedReason: string | null
+  }
 }
 
 export async function settlePriceBotRule(

@@ -76,8 +76,18 @@ import {
   setAutoTradeBatch,
   getConnectionState,
   cancelRestingBuyOrders,
+  muteSurgeSignals,
 } from '../bots/price-bot/price-bot.js';
 import { syncRuleOutcomes } from '../bots/price-bot/outcome-sync.js';
+import {
+  TOTAL_GOAL_LINES,
+  FIRST_TOTAL_LINE,
+  extractTotalGoalLine,
+  matchMinuteFrom,
+} from '../bots/price-bot/goal-lines.js';
+import { decideNextLineOpening, buyGateReason } from '../bots/price-bot/next-line.js';
+import { saveLineSnapshots, getLineSnapshots } from '../bots/price-bot/db.js';
+import type { LineSnapshot } from '../bots/price-bot/db.js';
 import { fetchRealOrderReport, listRealOrderReportLeagues } from '../bots/price-bot/report.js';
 import { config } from '../config.js';
 
@@ -632,77 +642,37 @@ function parseJsonArray(val: unknown): string[] {
   return [];
 }
 
-/** 大小球盘口的合法总进球数线；超过 4.5 的线几乎无成交，不纳入递进 */
-const TOTAL_GOAL_LINES = [0.5, 1.5, 2.5, 3.5, 4.5];
-
-/** 递进的起点：批量创建只建这一档，更高的线等它打出后再接 */
-const FIRST_TOTAL_LINE = 0.5;
-
 /**
- * 只认「全场、双方合计」的大小球盘。其余一律返回 null。
+ * 抓一场比赛的初盘大小球梯度。
  *
- * 线可能存在于两处：DB 的 line 列（DECIMAL，mysql2 返回字符串），
- * 或问题文本里的 "X.5"。平台并非所有大小球盘都填了 line 列，
- * 故两处都取候选值，任一命中白名单即算有效，避免把有效盘口误杀。
- *
- * 三类要排除的盘口，都会被 classifyMarketType 归成 total：
- *
- * 1. 角球盘（含 over/under 字样），平台上几乎无人交易。
- * 2. 半场/下半场盘。MARKET_TYPE_KEYWORDS 里 halftime/second_half 排在 total
- *    之前且先命中先返回，所以多数已被归成 halftime——但那依赖关键词写法，
- *    "Over/Under 1.5 in the first half" 这类词序就漏了，这里再兜一层。
- * 3. 单独一方球队的进球盘（"Will Arsenal score over 1.5 goals?"）。
- *    它和全场大小球的价格逻辑完全不同：进球方是谁决定它动不动，
- *    进球买入的前提「任意进球都推高价格」在这里不成立。
+ * 只在赛前调用。soccer_markets.outcome_prices 是实时价，进球后会被覆盖，
+ * 所以「开哨时这档多少钱」必须在开哨前另存一份（见 price_bot_line_snapshots）。
+ * 写入是 INSERT IGNORE，首次写入即定稿，重复调用不会污染。
  */
-function extractTotalGoalLine(m: { question_en?: unknown; question_zh?: unknown; line?: unknown }): number | null {
-  const qEn = String(m.question_en ?? '').toLowerCase();
-  const qZh = String(m.question_zh ?? '');
+async function captureLineSnapshots(eventId: string, markets: any[]): Promise<number> {
+  const rows: LineSnapshot[] = [];
+  for (const m of markets) {
+    if (String(m.market_type) !== 'total') continue;
+    const line = extractTotalGoalLine(m);
+    if (line == null) continue;
 
-  if (qEn.includes('corner') || qZh.includes('角球')) return null;
+    const outcomes = parseJsonArray(m.outcomes);
+    const prices = parseJsonArray(m.outcome_prices);
+    const idx = outcomes.findIndex((o) => String(o).trim().toLowerCase() === 'over');
+    const overPrice = idx >= 0 && prices[idx] != null ? Number(prices[idx]) : null;
 
-  // 半场盘：兜 classifyMarketType 因词序而漏掉的写法
-  if (/half|1st h|2nd h/.test(qEn) || qZh.includes('半场')) return null;
-
-  // 单队盘：主语是某一队而不是整场比赛。平台上有两种写法。
-  //
-  // 1) 句子式："Will Arsenal score over 1.5 goals?"
-  // 2) 标题式（实际数据里占绝大多数）：
-  //      全场  "FK Liepaja vs. Riga FC: O/U 0.5"
-  //      单队  "FK Liepaja vs. Riga FC: FK Liepaja O/U 0.5"
-  //    两者的差别只在冒号后、O/U 之前是否还夹着一个队名。
-  //
-  // 早先只判了句子式，标题式的单队盘全部漏过去，导致一键批量创建
-  // 每场比赛建了 3 条规则（全场 + 主队 + 客队）而不是 1 条。
-  //
-  // 所以标题式改成正面判定：取最后一个冒号之后的部分，它必须以 O/U
-  // 或 Over/Under 开头才算全场盘。有队名夹在中间就不是。
-  const colonIdx = qEn.lastIndexOf(':');
-  if (colonIdx >= 0) {
-    const tail = qEn.slice(colonIdx + 1).trim();
-    // 冒号后有内容且不是以 o/u | over/under 开头 → 夹着队名，是单队盘
-    if (tail && !/^(o\/u|over\/under|total)\b/.test(tail)) return null;
+    rows.push({
+      eventId,
+      marketId: String(m.id),
+      line,
+      overPrice: overPrice != null && Number.isFinite(overPrice) ? overPrice : null,
+      // 盘口行上的 best_bid/best_ask 也是实时列，但赛前它们就等于初盘
+      bestBid: m.best_bid != null ? Number(m.best_bid) : null,
+      bestAsk: m.best_ask != null ? Number(m.best_ask) : null,
+    });
   }
-
-  const isMatchTotal =
-    /total\s+goals/.test(qEn) ||
-    /combined/.test(qEn) ||
-    qZh.includes('总进球') ||
-    // "A vs B: O/U 2.5" 这种标题式写法，冒号前是对阵双方
-    /\bvs\.?\b.*\b(o\/u|over\/under)\b/.test(qEn);
-  const looksTeamSpecific =
-    /\bwill\s+.+\s+score\b/.test(qEn) || /\bto\s+score\s+(over|under)\b/.test(qEn);
-  if (looksTeamSpecific && !isMatchTotal) return null;
-
-  const candidates: number[] = [];
-  if (m.line != null) {
-    const n = Number(m.line);
-    if (Number.isFinite(n)) candidates.push(n);
-  }
-  const qm = qEn.match(/(\d+\.5)(?!\d)/); // 大小球线恒为半整数：0.5/1.5/2.5...
-  if (qm) candidates.push(Number(qm[1]));
-
-  return candidates.find((n) => TOTAL_GOAL_LINES.includes(n)) ?? null;
+  if (rows.length === 0) return 0;
+  return await saveLineSnapshots(rows);
 }
 
 app.get('/api/soccer/positions', asyncHandler(async (_req, res) => {
@@ -1753,9 +1723,21 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
     eventId: string; marketId: string; marketType: string; line: number | null; reason: string;
   }> = [];
 
+  let snapshotted = 0;
+
   for (const ev of events) {
     const eventId = String((ev as any).id);
     const markets = await getMarketsForEvent(eventId);
+
+    // 抓初盘梯度：这些赛事都是 not_started，此刻的价就是初盘。
+    // 这是整条递进链上唯一能拿到真初盘的时机——开哨后 outcome_prices
+    // 就被实时价覆盖了，而下一档开档决策要用初盘反推这场比赛的期望进球。
+    try {
+      snapshotted += await captureLineSnapshots(eventId, markets);
+    } catch (err: any) {
+      console.error(`[PriceBot] 抓取 ${eventId} 初盘梯度失败:`, err?.message ?? err);
+    }
+
     for (const m of markets) {
       const marketType = String(m.market_type);
       if (marketType !== 'total') continue;
@@ -1798,7 +1780,7 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
     }
   }
 
-  res.json({ success: true, created, skipped, eventsScanned: events.length });
+  res.json({ success: true, created, skipped, eventsScanned: events.length, snapshotted });
 }));
 
 /**
@@ -1834,8 +1816,22 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
 
   const result: {
     settled: { ruleId: number; line: number | null };
-    next: null | { ruleId: number; marketId: string; line: number; outcome: string; started: boolean };
+    next: null | {
+      ruleId: number; marketId: string; line: number; outcome: string; started: boolean;
+      mutedMs: number;
+    };
     reason?: string;
+    /** 开档决策详情：为什么开/不开，公平价多少。前端据此提示是否可授权 */
+    decision?: {
+      reasonCode: string;
+      nextLine: number | null;
+      lambdaFull: number | null;
+      fairProb: number | null;
+      marketPrice: number | null;
+      goalsNeeded: number | null;
+      /** 买入闸门：非 null 表示即使开了档，此刻也不该授权下单 */
+      buyBlockedReason: string | null;
+    };
   } = { settled: { ruleId: id, line: null }, next: null };
 
   // 当前档：规则行上没有 line 列，要回查盘口
@@ -1884,6 +1880,50 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
     return;
   }
 
+  // ---- 开档决策 ----
+  //
+  // 递进原本是无条件的，实测下来那正是资金自杀的来源：赢一次赚约 $0.50，
+  // 错一次亏约 $4.40，而错的形态几乎都是「买了还没打出的下一档」。
+  // 这里用初盘反推的公平价判断这一档是否值得开，并给出买入闸门。
+  //
+  // 注意开档与买入是两件事：开档便宜可逆，宁可多开；买入动钱不可逆，
+  // 闸门是比分。所以下面即使 open=true 也照旧 autoTradeEnabled=false。
+  const snapshots = await getLineSnapshots(rule.eventId).catch(() => new Map());
+  const [evRows] = await pool.execute<any[]>(
+    `SELECT start_time, end_time FROM soccer_events WHERE id = ?`,
+    [rule.eventId],
+  );
+  // start_time 优先；缺失时退 end_time（它是取整到整点/半点的计划开哨时刻，
+  // 与 auto-trade.ts evaluateMatchClock 同口径，带最多 ±30 分钟取整误差）
+  const kickoff = evRows[0]?.start_time ?? evRows[0]?.end_time ?? null;
+
+  const decision = decideNextLineOpening({
+    settledLine: curLine,
+    kickoffOver25: snapshots.get(2.5)?.overPrice ?? null,
+    kickoffNextOver: snapshots.get(nextLine)?.overPrice ?? null,
+    bestBid: target.best_bid != null ? Number(target.best_bid) : null,
+    bestAsk: target.best_ask != null ? Number(target.best_ask) : null,
+    minute: matchMinuteFrom(kickoff),
+    // 比分源：price-bot 不接比分，所以这里传 null。decideNextLineOpening 会
+    // 按「上一档已打出」推断下限——人工点完结的语义本来就是「我看到进球了」。
+    totalGoals: null,
+  });
+
+  result.decision = {
+    reasonCode: decision.reasonCode,
+    nextLine: decision.nextLine,
+    lambdaFull: decision.lambdaFull,
+    fairProb: decision.fairProb,
+    marketPrice: decision.marketPrice,
+    goalsNeeded: decision.goalsNeeded,
+    buyBlockedReason: buyGateReason(nextLine, null),
+  };
+
+  if (!decision.open) {
+    res.json({ success: true, ...result, reason: decision.reason });
+    return;
+  }
+
   try {
     const nextId = await createRule({
       tokenId: String(tokens[idx]),
@@ -1901,19 +1941,25 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
       enabled: true,
     });
     let started = false;
+    let mutedMs = 0;
     if (autoStart) {
       try {
         await startMonitor(nextId);
         started = true;
+        // 买入静默：新盘口一上线就带着上一档打出时的余震涨幅，
+        // 不静默的话状态机立刻判「涨幅达标」并发买入信号——而那波涨幅
+        // 属于刚完结的上一档，不是这一档的进球。必须在 startMonitor 之后设，
+        // 监控对象要先存在。
+        if (muteSurgeSignals(nextId, decision.cooldownMs)) mutedMs = decision.cooldownMs;
       } catch (err: any) {
         console.error(`[PriceBot] 下一档 ${nextId} 启动监控失败:`, err?.message ?? err);
       }
     }
     result.next = {
       ruleId: nextId, marketId: String(target.id), line: nextLine,
-      outcome: String(outcomes[idx]), started,
+      outcome: String(outcomes[idx]), started, mutedMs,
     };
-    res.json({ success: true, ...result });
+    res.json({ success: true, ...result, reason: decision.reason });
   } catch (err: any) {
     // 规则已存在（uk_token_rule）不算失败：可能之前手工建过，直接把它启用起来
     if (/duplicate|ER_DUP_ENTRY/i.test(err?.message || '')) {

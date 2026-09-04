@@ -511,20 +511,40 @@ export default function PriceBotPage() {
     if (!confirm(
       `完结「${label}」？\n\n` +
       `· 停止监控，该机器人状态改为「待结算」（记录保留）\n` +
-      `· 自动接上同场下一档大小球盘口并开始监控\n` +
+      `· 按初盘反推的公平价判断下一档值不值得开，值得才建并开始监控\n` +
       `· 下一档默认不授权自动下单，需要你再点一次「授权下单」`
     )) return
     try {
       const r = await settlePriceBotRule(rule.id, { next: true, startNext: true })
       await Promise.all([loadRules(), loadMonitors(), loadAutoTrade()])
+
+      const d = r.decision
+      // 公平价与现价一并给出：授权与否的判断依据就是这两个数的差
+      const priceLine = d && (d.fairProb != null || d.marketPrice != null)
+        ? `\n公平价 ${d.fairProb != null ? (d.fairProb * 100).toFixed(1) + '%' : '未知'}` +
+          `，现价 ${d.marketPrice != null ? d.marketPrice.toFixed(3) : '未知'}` +
+          `${d.lambdaFull != null ? `（λ全场 ${d.lambdaFull.toFixed(2)}）` : ''}`
+        : ''
+
       if (r.next) {
+        const muted = r.next.mutedMs > 0
+          ? `买入信号静默 ${Math.round(r.next.mutedMs / 1000)} 秒——刚完结那波涨幅属于上一档，不是这一档的进球。\n\n`
+          : ''
+        // shadow_hot：现价明显贵于公平价，是更低档涨幅的影子。此时授权就是样本里那几笔亏损的形态。
+        const warn = d?.reasonCode === 'shadow_hot'
+          ? `⚠ 现价远高于公平价，这是上一档涨幅的影子，此价位不要授权下单。\n\n`
+          : d?.reasonCode === 'no_snapshot'
+            ? `⚠ 缺初盘快照，无法计算公平价，暂不要授权下单。\n\n`
+            : ''
         alert(
           `已完结 Over ${r.settled.line ?? '?'}，接上 Over ${r.next.line}` +
-          `（${r.next.started ? '已开始监控' : '创建成功但未能启动监控，请手动启动'}）\n\n` +
-          `新盘口未授权自动下单。`
+          `（${r.next.started ? '已开始监控' : '创建成功但未能启动监控，请手动启动'}）${priceLine}\n\n` +
+          warn + muted +
+          `新盘口未授权自动下单。` +
+          (d?.buyBlockedReason ? `\n买入闸门：${d.buyBlockedReason}` : '')
         )
       } else {
-        alert(`已完结。${r.reason ?? '未创建下一档'}`)
+        alert(`已完结，未开下一档。\n\n${r.reason ?? '未创建下一档'}${priceLine}`)
       }
     } catch (err) {
       alert(err instanceof Error ? err.message : String(err))

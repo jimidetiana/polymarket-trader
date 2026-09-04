@@ -51,6 +51,7 @@ import {
   MIN_ORDER_SHARES,
   MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
+import { isSurgeMuted, extendMuteUntil } from './next-line.js';
 import { DEFAULT_CONFIG, DEFAULT_AUTO_TRADE } from './types.js';
 import type {
   PriceBotConfig,
@@ -1290,6 +1291,16 @@ function stepGoalSurge(
   pushGoalSurgeTick(monitor, snapshot, p.surgeWindowMs, now)
   if (monitor.goalSurgeState == null) monitor.goalSurgeState = 'idle'
 
+  // 买入静默窗口（见 PriceMonitorState.surgeMutedUntil）：
+  // 刚从上一档递进过来时，盘口上还残留着上一档打出的那波涨幅，
+  // 它会把状态机直接推到「涨幅达标」。静默期内只喂 tick 不发信号，
+  // 窗口结束时缓冲区里已是静默后的价格，递增判定从新基准起算。
+  if (isSurgeMuted(monitor.surgeMutedUntil, now)) {
+    monitor.goalSurgeState = 'idle'
+    monitor.candidateSince = undefined
+    return { fire: false, confirm: null }
+  }
+
   const bid = snapshot.bestBid
   const bidSize = snapshot.bestBidSize
   const ask = snapshot.bestAsk
@@ -2280,6 +2291,23 @@ export async function cancelRestingBuyOrders(
     console.error(`[PriceBot] 查询挂单失败 rule=${ruleId}:`, err?.message)
   }
   return { cancelled, failed }
+}
+
+/**
+ * 给某条规则设一段买入静默期（毫秒），期间不评估进球买入信号。
+ *
+ * 用在「完结上一档、开下一档」之后：新盘口一上线就带着上一档的余震涨幅，
+ * 不静默的话它必然立刻发一次买入信号，而那不是这一档的进球。
+ * 见 PriceMonitorState.surgeMutedUntil。
+ *
+ * 返回是否真的设上了——监控还没建起来时返回 false，调用方据此提示。
+ */
+export function muteSurgeSignals(ruleId: number, durationMs: number): boolean {
+  if (!(durationMs > 0)) return false
+  const monitor = state.monitors.get(ruleId)
+  if (!monitor) return false
+  monitor.surgeMutedUntil = extendMuteUntil(monitor.surgeMutedUntil, durationMs)
+  return true
 }
 
 /**
