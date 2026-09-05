@@ -5,6 +5,10 @@
  * 与 value-bot 不同，不需要关联比分数据，仅基于 CLOB 价格本身。
  */
 
+import { type AutoSettleParams, DEFAULT_AUTO_SETTLE } from './auto-settle.js'
+
+export type { AutoSettleParams }
+
 // ==================== 配置类型 ====================
 
 /**
@@ -271,6 +275,13 @@ export interface PriceBotConfig {
   autoTradeDefaults: AutoTradeParams
   /** 进球买入信号默认参数（rule 未配置对应字段时回退） */
   goalSurgeDefaults: GoalSurgeParams
+  /**
+   * 自动完结：买价站上阈值并持稳后自动完结当前档、按公平价判断是否递进。
+   *
+   * 与 autoTradeEnabled 相反，这个默认**开启**：完结只是停监控 + 建下一档，
+   * 且新档硬编码 autoTradeEnabled=false，全程不动钱，所以无人值守也安全。
+   */
+  autoSettle: AutoSettleParams
 }
 
 export const DEFAULT_CONFIG: PriceBotConfig = {
@@ -304,6 +315,7 @@ export const DEFAULT_CONFIG: PriceBotConfig = {
     confirmMin: 0.98,
     confirmHoldMs: 2_000,
   },
+  autoSettle: { ...DEFAULT_AUTO_SETTLE },
 }
 
 // ==================== 监控规则类型 ====================
@@ -477,6 +489,13 @@ export interface PriceMonitorState {
    * 所以静默期内的价格路径仍然完整落库，事后能复盘那波余震。
    */
   surgeMutedUntil?: number
+  /**
+   * 自动完结：买价站上阈值的起始时刻（毫秒时间戳）。
+   * 跌出阈值即清空——薄盘的瞬时尖峰不能累计成「持稳」。
+   */
+  settleHoldSince?: number
+  /** 自动完结已触发。防止完结流程还在跑时同一条规则被重复触发。 */
+  autoSettleFired?: boolean
 }
 
 // ==================== 监控日志 ====================

@@ -77,6 +77,7 @@ import {
   getConnectionState,
   cancelRestingBuyOrders,
   muteSurgeSignals,
+  registerAutoSettleExecutor,
 } from '../bots/price-bot/price-bot.js';
 import { syncRuleOutcomes } from '../bots/price-bot/outcome-sync.js';
 import {
@@ -1796,16 +1797,44 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
  * 下一档继承当前规则的 goalSurgeParams 和 autoTradeParams，但**不继承授权开关**：
  * autoTradeEnabled 一律为 false。递进可以自动，动钱不能自动——新盘口要你再点一次授权。
  */
-app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) => {
-  const id = Number(req.params.id);
-  const body = req.body || {};
-  const wantNext = body.next !== false; // 默认接下一档
-  const autoStart = body.startNext !== false; // 默认把下一档也启动监控
+/** 完结结果。抽出类型是为了让 HTTP 路由和自动完结走同一套返回结构。 */
+interface SettleOutcome {
+  ok: boolean;
+  error?: string;
+  settled: { ruleId: number; line: number | null };
+  next: null | {
+    ruleId: number; marketId: string; line: number; outcome: string; started: boolean;
+    mutedMs: number;
+  };
+  reason?: string;
+  decision?: {
+    reasonCode: string;
+    nextLine: number | null;
+    lambdaFull: number | null;
+    fairProb: number | null;
+    marketPrice: number | null;
+    goalsNeeded: number | null;
+    buyBlockedReason: string | null;
+  };
+}
+
+/**
+ * 完结一条规则并按公平价决定是否递进。
+ *
+ * 从路由处理器里抽出来，因为有两个调用方：人工点「完结」，
+ * 以及价格站上 0.99 持稳后 price-bot 的自动完结。两条路径必须完全一致，
+ * 复制一份迟早会分叉。
+ */
+async function settleRuleAndAdvance(
+  id: number,
+  opts: { wantNext?: boolean; autoStart?: boolean } = {},
+): Promise<SettleOutcome> {
+  const wantNext = opts.wantNext !== false;
+  const autoStart = opts.autoStart !== false;
 
   const rule = await getRule(id);
   if (!rule) {
-    res.status(404).json({ success: false, error: '规则不存在' });
-    return;
+    return { ok: false, error: '规则不存在', settled: { ruleId: id, line: null }, next: null };
   }
 
   // 先停监控再禁用：反过来的话监控还在跑，可能在禁用生效前又触发一次
@@ -1814,25 +1843,7 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
   // 标记待结算：与 enabled=0 分开存，这样「完结」和「手动停用」在列表上能区分开
   await markRuleSettled(id, true);
 
-  const result: {
-    settled: { ruleId: number; line: number | null };
-    next: null | {
-      ruleId: number; marketId: string; line: number; outcome: string; started: boolean;
-      mutedMs: number;
-    };
-    reason?: string;
-    /** 开档决策详情：为什么开/不开，公平价多少。前端据此提示是否可授权 */
-    decision?: {
-      reasonCode: string;
-      nextLine: number | null;
-      lambdaFull: number | null;
-      fairProb: number | null;
-      marketPrice: number | null;
-      goalsNeeded: number | null;
-      /** 买入闸门：非 null 表示即使开了档，此刻也不该授权下单 */
-      buyBlockedReason: string | null;
-    };
-  } = { settled: { ruleId: id, line: null }, next: null };
+  const result: SettleOutcome = { ok: true, settled: { ruleId: id, line: null }, next: null };
 
   // 当前档：规则行上没有 line 列，要回查盘口
   const [curRows] = await pool.execute<any[]>(
@@ -1843,41 +1854,27 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
   const curLine = curMarket ? extractTotalGoalLine(curMarket) : null;
   result.settled.line = curLine;
 
-  if (!wantNext) {
-    res.json({ success: true, ...result, reason: '仅完结，未创建下一档' });
-    return;
-  }
+  if (!wantNext) return { ...result, reason: '仅完结，未创建下一档' };
   if (curMarket && String(curMarket.market_type) !== 'total') {
-    res.json({ success: true, ...result, reason: '非大小球盘口，无下一档可接' });
-    return;
+    return { ...result, reason: '非大小球盘口，无下一档可接' };
   }
-  if (curLine == null) {
-    res.json({ success: true, ...result, reason: '无法识别当前盘口的总进球数线' });
-    return;
-  }
+  if (curLine == null) return { ...result, reason: '无法识别当前盘口的总进球数线' };
 
   const nextLine = TOTAL_GOAL_LINES[TOTAL_GOAL_LINES.indexOf(curLine) + 1];
-  if (nextLine == null) {
-    res.json({ success: true, ...result, reason: `${curLine} 已是最高档，无下一档` });
-    return;
-  }
+  if (nextLine == null) return { ...result, reason: `${curLine} 已是最高档，无下一档` };
 
   // 在同一场比赛里找 nextLine 的 Over 盘口
   const markets = await getMarketsForEvent(rule.eventId);
   const target = markets.find(
     (m) => String(m.market_type) === 'total' && extractTotalGoalLine(m) === nextLine,
   );
-  if (!target) {
-    res.json({ success: true, ...result, reason: `本场未找到 Over ${nextLine} 盘口` });
-    return;
-  }
+  if (!target) return { ...result, reason: `本场未找到 Over ${nextLine} 盘口` };
 
   const outcomes = parseJsonArray(target.outcomes);
   const tokens = parseJsonArray(target.clob_token_ids);
   const idx = outcomes.findIndex((o) => String(o).trim().toLowerCase() === 'over');
   if (idx < 0 || tokens[idx] == null) {
-    res.json({ success: true, ...result, reason: `Over ${nextLine} 盘口未匹配到 over outcome` });
-    return;
+    return { ...result, reason: `Over ${nextLine} 盘口未匹配到 over outcome` };
   }
 
   // ---- 开档决策 ----
@@ -1926,10 +1923,7 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
     buyBlockedReason: buyGateReason(nextLine, null),
   };
 
-  if (!decision.open) {
-    res.json({ success: true, ...result, reason: decision.reason });
-    return;
-  }
+  if (!decision.open) return { ...result, reason: decision.reason };
 
   try {
     const nextId = await createRule({
@@ -1966,16 +1960,51 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
       ruleId: nextId, marketId: String(target.id), line: nextLine,
       outcome: String(outcomes[idx]), started, mutedMs,
     };
-    res.json({ success: true, ...result, reason: decision.reason });
+    return { ...result, reason: decision.reason };
   } catch (err: any) {
     // 规则已存在（uk_token_rule）不算失败：可能之前手工建过，直接把它启用起来
     if (/duplicate|ER_DUP_ENTRY/i.test(err?.message || '')) {
-      res.json({ success: true, ...result, reason: `Over ${nextLine} 规则已存在` });
-      return;
+      return { ...result, reason: `Over ${nextLine} 规则已存在` };
     }
-    res.json({ success: true, ...result, reason: `创建下一档失败: ${err?.message ?? 'unknown'}` });
+    return { ...result, reason: `创建下一档失败: ${err?.message ?? 'unknown'}` };
   }
+}
+
+app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const out = await settleRuleAndAdvance(Number(req.params.id), {
+    wantNext: body.next !== false,
+    autoStart: body.startNext !== false,
+  });
+  if (!out.ok) {
+    res.status(404).json({ success: false, error: out.error });
+    return;
+  }
+  const { ok, error, ...rest } = out;
+  res.json({ success: true, ...rest });
 }));
+
+/**
+ * 自动完结的执行器：价格站上阈值持稳后，由 price-bot 调到这里。
+ *
+ * 与人工点「完结」走同一个 settleRuleAndAdvance，所以递进判据、静默、
+ * 「新档不授权下单」这些规则不会在两条路径间分叉。
+ */
+registerAutoSettleExecutor(async (ruleId: number) => {
+  const out = await settleRuleAndAdvance(ruleId, { wantNext: true, autoStart: true });
+  if (!out.ok) {
+    console.error(`[PriceBot] 自动完结失败 rule=${ruleId}: ${out.error}`);
+    return;
+  }
+  const nextTxt = out.next
+    ? `→ 已开 Over ${out.next.line}（规则 #${out.next.ruleId}，` +
+      `${out.next.started ? '监控已启动' : '监控未启动'}，静默 ${Math.round(out.next.mutedMs / 1000)}s，未授权下单）`
+    : '→ 未开下一档';
+  console.log(
+    `[PriceBot] 自动完结 rule=${ruleId} Over ${out.settled.line ?? '?'} ${nextTxt}；` +
+    `判据：${out.reason ?? '无'}`,
+  );
+});
 
 app.put('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);

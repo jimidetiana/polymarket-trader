@@ -52,6 +52,7 @@ import {
   MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
 import { isSurgeMuted, extendMuteUntil } from './next-line.js';
+import { stepAutoSettle, resolveAutoSettleParams } from './auto-settle.js';
 import { DEFAULT_CONFIG, DEFAULT_AUTO_TRADE } from './types.js';
 import type {
   PriceBotConfig,
@@ -978,6 +979,10 @@ async function evaluateRuleForId(ruleId: number, snapshot: PriceSnapshot): Promi
 
   // 采样落库（同步入缓冲，不影响下方临界区）
   bufferPriceSample(rule, monitor, snapshot);
+
+  // 自动完结：买价站上阈值并持稳即判该档已打出。放在信号评估之前，
+  // 因为已结算的档位不该再产生买入信号（0.99 买入只剩 $0.01 空间）。
+  maybeAutoSettle(rule, monitor, snapshot);
 
   // 进球买入信号：独立状态机。不走 percent_change 的基准价/波动抑制逻辑，
   // 断联/高波动窗口内照常评估（正是进球致重定价的时刻）。
@@ -2308,6 +2313,77 @@ export function muteSurgeSignals(ruleId: number, durationMs: number): boolean {
   if (!monitor) return false
   monitor.surgeMutedUntil = extendMuteUntil(monitor.surgeMutedUntil, durationMs)
   return true
+}
+
+// ==================== 自动完结 ====================
+
+/**
+ * 自动完结的执行器。由 server.ts 在启动时注册。
+ *
+ * 用回调注入而不是直接 import：完结+递进要读 soccer_markets / soccer_events
+ * 并调 startMonitor，若在此处 import 那套编排就会形成
+ * price-bot → settle 编排 → price-bot 的循环依赖。
+ */
+type AutoSettleExecutor = (ruleId: number) => Promise<void>
+let autoSettleExecutor: AutoSettleExecutor | null = null
+
+export function registerAutoSettleExecutor(fn: AutoSettleExecutor | null): void {
+  autoSettleExecutor = fn
+}
+
+/**
+ * 推进自动完结判定，达标则异步执行完结流程。
+ *
+ * 同步部分（状态机推进 + 抢占标记）不含 await，避免同一条规则被并发触发两次。
+ */
+function maybeAutoSettle(
+  rule: PriceMonitorRule,
+  monitor: PriceMonitorState,
+  snapshot: PriceSnapshot,
+): void {
+  if (monitor.autoSettleFired) return
+  const p = resolveAutoSettleParams(undefined, state.config.autoSettle)
+  const now = Date.now()
+  const step = stepAutoSettle(snapshot.bestBid, monitor.settleHoldSince, p, now)
+  monitor.settleHoldSince = step.holdSince
+  if (!step.fire) return
+
+  // 抢占：先标记再 await，后续 tick 在函数开头就被拦下
+  monitor.autoSettleFired = true
+
+  const heldSec = Math.round(p.holdMs / 1000)
+  const bidTxt = snapshot.bestBid != null ? snapshot.bestBid.toFixed(4) : '?'
+  console.log(
+    `[PriceBot] 规则 #${rule.id} 自动完结：买价 ${bidTxt} 持稳 ${heldSec}s ≥ 阈值 ${p.bidThreshold}`,
+  )
+
+  void recordLog({
+    ruleId: rule.id!,
+    tokenId: rule.tokenId,
+    eventId: rule.eventId,
+    outcome: rule.outcome,
+    action: 'trigger',
+    price: snapshot.lastPrice,
+    bestBid: snapshot.bestBid,
+    bestBidSize: snapshot.bestBidSize,
+    bestAsk: snapshot.bestAsk,
+    bestAskSize: snapshot.bestAskSize,
+    source: snapshot.source,
+    detail: `[自动完结] 买价 ${bidTxt} 持稳 ${heldSec}s（阈值 ${p.bidThreshold}），判定该档已打出，转入完结与递进判断`,
+  }).catch((err: any) => {
+    console.error(`[PriceBot] 自动完结日志写入失败 rule=${rule.id}:`, err?.message ?? err)
+  })
+
+  if (!autoSettleExecutor) {
+    console.warn(`[PriceBot] 规则 #${rule.id} 达到自动完结条件，但未注册执行器，跳过`)
+    return
+  }
+  void autoSettleExecutor(rule.id!).catch((err: any) => {
+    console.error(`[PriceBot] 自动完结执行失败 rule=${rule.id}:`, err?.message ?? err)
+    // 执行失败就把抢占标记放开，让后续 tick 有机会重试
+    const m = state.monitors.get(rule.id!)
+    if (m) m.autoSettleFired = false
+  })
 }
 
 /**
