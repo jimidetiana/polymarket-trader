@@ -182,10 +182,7 @@ test('高进球比赛做到 4.5 档照样开：样本里 4.5 是唯一零亏损�
 
 // ==================== 开档决策：结构性挡掉 ====================
 
-// 这条曾断言「不开档」。实测推翻了它：真实成交里第 60 分钟后那批
-// （n=20，胜率 95%，ROI +23.1%）是唯一稳定为正的，按公平价高低拦会一起挡掉。
-// 低公平价本身不是拒绝理由，价格有没有跟着虚高才是。
-test('尾盘公平价低但价格没虚高：照开，标 cheap_value', () => {
+test('剩余时间不足时不再开新档', () => {
   const d = decideNextLineOpening({
     settledLine: 1.5,
     kickoffOver25: 0.5,
@@ -194,27 +191,8 @@ test('尾盘公平价低但价格没虚高：照开，标 cheap_value', () => {
     minute: 85,
     totalGoals: 2,
   })
-  assert.equal(d.open, true, `实际 ${d.reasonCode}: ${d.reason}`)
-  assert.equal(d.reasonCode, 'cheap_value')
-  assert.ok(d.fairProb != null && d.fairProb < 0.3, `公平价应低于 0.3，实际 ${d.fairProb}`)
-  // 不加长静默：这形态本身就是要抓那一下涨，多静默就抓不到了
-  assert.equal(d.cooldownMs, 8_000)
-})
-
-test('尾盘同样低的公平价，但价格虚高 → 仍判影子并静默 60s', () => {
-  const d = decideNextLineOpening({
-    settledLine: 1.5,
-    kickoffOver25: 0.5,
-    bestBid: 0.88,
-    bestAsk: 0.9,
-    minute: 85,
-    totalGoals: 2,
-  })
-  assert.equal(d.reasonCode, 'shadow_hot', `实际 ${d.reasonCode}: ${d.reason}`)
-  assert.equal(d.open, true)
-  assert.ok(d.cooldownMs >= 60_000)
-  // 关键：与上一条的公平价一致，唯一的差别是价格 —— 证明分流靠的是价格不是概率
-  assert.ok(d.fairProb != null && d.fairProb < 0.3)
+  assert.equal(d.open, false)
+  assert.equal(d.reasonCode, 'low_fair_prob')
 })
 
 test('比赛已结束（分钟 ≥ 90）不开档', () => {
@@ -374,11 +352,10 @@ test('影子档位的静默时长明显长于普通开档', () => {
 })
 
 test('不开档时静默时长为 0：没有监控要静默', () => {
-  // 用真正的死局（比赛已过 90 分钟）而不是「尾盘低价」——后者现在是开档的
   const d = decideNextLineOpening({
-    settledLine: 1.5, kickoffOver25: 0.5, bestBid: 0.2, minute: 92, totalGoals: 2,
+    settledLine: 1.5, kickoffOver25: 0.5, bestBid: 0.2, minute: 85, totalGoals: 2,
   })
-  assert.equal(d.open, false, `实际 ${d.reasonCode}: ${d.reason}`)
+  assert.equal(d.open, false)
   assert.equal(d.cooldownMs, 0)
 })
 

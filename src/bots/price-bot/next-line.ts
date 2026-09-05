@@ -54,17 +54,10 @@ export type NextLineReasonCode =
   | 'thin_book'
   /** 该档初盘就极低：这场比赛的进球分布压根不到这个档位 */
   | 'cheap_kickoff'
-  /** 剩余时间几乎为零（公平价已归零）：这档不可能再打出 */
+  /** 剩余时间里公平概率已低于阈值 */
   | 'low_fair_prob'
   /** 此刻盘口价明显高于公平价：更低档的涨幅影子，给冷却 */
   | 'shadow_hot'
-  /**
-   * 公平价低，但盘口价没跟着虚高 —— 尾盘抓绝杀的形态。
-   *
-   * 照开且不额外静默：实测里第 60 分钟后的成交是唯一稳定为正的一批
-   * （n=20，胜率 95%，ROI +23.1%），按公平价高低设下限会把它一起挡掉。
-   */
-  | 'cheap_value'
   /** 通过所有闸门 */
   | 'ok'
 
@@ -121,21 +114,8 @@ export interface NextLineParams {
   maxSpread: number
   /** 该档初盘价下限：低于它说明这场比赛压根不到这个档位 */
   minKickoffOver: number
-  /**
-   * 公平概率的「标记线」，不是拦截线：低于它标 cheap_value，仍然开档。
-   *
-   * 早先这里是拦截线（minFairProb），把尾盘绝杀那一批一起挡了。低公平价
-   * 同时是「尾盘绝杀」和「阶梯自杀」的特征，光看概率分不开两者，
-   * 得看价格有没有跟着虚高 —— 那是 shadowGap 的活。
-   */
-  lowFairProb: number
-  /**
-   * 公平概率的拦截线：低到这个程度视为死局（比赛已结束或剩余时间归零）。
-   *
-   * 取极小值而不是 0：λ剩余趋 0 时 Poisson 尾概率是渐近的，
-   * 硬比 0 会让「第 89 分钟」这种实际没戏的档位也开出来。
-   */
-  deadFairProb: number
+  /** 公平概率下限：低于它不值得占用一条监控 */
+  minFairProb: number
   /** 盘口价高于公平价多少算「更低档的影子」 */
   shadowGap: number
   /** 普通开档的买入静默毫秒 */
@@ -152,10 +132,8 @@ export const DEFAULT_NEXT_LINE_PARAMS: NextLineParams = {
   // λ=2.7 时 Over 4.5 初盘约 0.14，Over 3.5 约 0.29。取 0.10 只挡真正没戏的档位：
   // 样本里最高做到 4.5 的 3 场净赚 $4.75 且零亏损，不能把 4.5 一刀切掉。
   minKickoffOver: 0.1,
-  // 0.30：低于三成只做标记（cheap_value），不拦。尾盘正是这个区间。
-  lowFairProb: 0.3,
-  // 0.02：再进一球的概率不到 2% 才算死局。λ剩余≈0.02 对应第 89 分钟之后。
-  deadFairProb: 0.02,
+  // 0.30：再进一球的概率不足三成时，这条监控占的是额度不是机会。
+  minFairProb: 0.3,
   // 0.12：实测亏损单的溢价都在 0.12 以上（塞尔塔 0.90 vs 公平 0.66，
   // 清水心跳 0.69 vs 公平 0.42），而 minute 10 的 0.88 vs 公平 0.91 是公平的。
   shadowGap: 0.12,
@@ -374,27 +352,21 @@ export function decideNextLineOpening(input: NextLineInput): NextLineDecision {
     }
   }
 
-  const minuteTxt = input.minute == null ? '分钟未知' : `第 ${input.minute.toFixed(0)} 分钟`
-
-  // 死局：剩余时间的期望进球已趋零，这一档不可能再打出。
-  // 只拦这一种「概率低」，其余低概率场景交给下面的价格判据。
-  if (fair != null && fair.fairProb < p.deadFairProb) {
+  // 剩余时间的公平概率：低到一定程度就不值得占监控额度。
+  // 这一条同时覆盖「比赛已结束」（衰减为 0 → 公平价 0）。
+  if (fair != null && fair.fairProb < p.minFairProb) {
+    const minuteTxt = input.minute == null ? '分钟未知' : `第 ${input.minute.toFixed(0)} 分钟`
     return {
       ...base,
       reasonCode: 'low_fair_prob',
       reason:
         `${minuteTxt}，再进 ${goalsNeeded} 球的公平概率 ${(fair.fairProb * 100).toFixed(1)}%` +
-        ` < 死局线 ${(p.deadFairProb * 100).toFixed(0)}%（λ剩余=${fair.lambdaRemaining.toFixed(2)}），` +
-        `这一档已无法打出`,
+        ` < 下限 ${(p.minFairProb * 100).toFixed(0)}%（λ剩余=${fair.lambdaRemaining.toFixed(2)}）`,
     }
   }
 
   // 此刻价格远高于公平价 = 上一档涨幅的影子。照开，但静默更久：
   // 不开会漏掉后面的真进球，立刻买则正是样本里那几笔亏损的形态。
-  //
-  // 这一条必须排在低公平价之前：自杀形态（公平价 0.10、现价 0.88）与
-  // 绝杀形态（公平价 0.10、现价 0.15）的公平价一样低，先按概率分流
-  // 会让两者都走进同一个分支，而它们要走反方向。
   if (fair != null && bid != null && bid - fair.fairProb > p.shadowGap) {
     return {
       ...base,
@@ -406,22 +378,6 @@ export function decideNextLineOpening(input: NextLineInput): NextLineDecision {
         `这是上一档涨幅的影子。已开监控并静默 ${Math.round(p.shadowCooldownMs / 1000)}s，` +
         `此价位不要授权下单`,
       cooldownMs: p.shadowCooldownMs,
-    }
-  }
-
-  // 公平价低、但价格没跟着虚高：尾盘绝杀的形态，照开。
-  // 实测第 60 分钟后的成交是唯一稳定为正的一批，按概率下限拦会把它一起挡掉。
-  if (fair != null && fair.fairProb < p.lowFairProb) {
-    return {
-      ...base,
-      open: true,
-      reasonCode: 'cheap_value',
-      reason:
-        `${minuteTxt}，再进 ${goalsNeeded} 球的公平概率仅 ${(fair.fairProb * 100).toFixed(1)}%` +
-        `，但现价 ${bid != null ? bid.toFixed(3) : '未知'} 未随之虚高` +
-        `（λ剩余=${fair.lambdaRemaining.toFixed(2)}）——尾盘低价形态，已开监控。` +
-        `买入仍需比分打出该线，且只在卖价同样便宜时才有正边`,
-      cooldownMs: p.cooldownMs,
     }
   }
 
