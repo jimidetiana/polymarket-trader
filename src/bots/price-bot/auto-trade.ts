@@ -251,6 +251,66 @@ export function evaluateBookQuality(
 }
 
 /**
+ * 死区闸门：买入价落在「已按结算价定价、但线实际没打出」的区间内就拒绝。
+ *
+ * 见 AutoTradeParams.deadBandLow 的注释。要点是这不能用价格上限替代——
+ * 死区之上（0.93+）反而是 100% 胜率，因为那是真结算了。中间那一段才是坑。
+ *
+ * 判的是**限价**（真正会付出去的价），不是 bestBid：闸门要拦的是实际成本。
+ *
+ * 返回 null 表示放行。
+ */
+export function evaluateDeadBand(
+  limitPrice: number,
+  p: Pick<AutoTradeParams, 'deadBandLow' | 'deadBandHigh'>,
+): string | null {
+  const lo = p.deadBandLow ?? 0
+  const hi = p.deadBandHigh ?? 0
+  // 上界不高于下界视为禁用
+  if (!(hi > lo)) return null
+  if (limitPrice >= lo && limitPrice < hi) {
+    return (
+      `买入价${limitPrice.toFixed(4)} 落在死区 [${lo}, ${hi})：` +
+      `该价位已按结算价定价，但实测这一段的线多半还没打出` +
+      `（92 盘口分档：此区间胜率 79.3% < 平衡所需 88.5%，净亏，而两侧都盈利）`
+    )
+  }
+  return null
+}
+
+/**
+ * 余量闸门：公平价与买入价的差额。
+ *
+ * 这是死区的动态版——死区之所以亏，是因为那个价位上市场价超出公平价最多。
+ * 用余量表达就不必写死价格区间，能随进球分布/剩余时间/还需几球自动调整。
+ *
+ * `minFairMargin` 为 null 时**只计算不拦截**（观测模式），返回的 reason 为 null
+ * 但 margin 仍然给出，调用方把它写进下单记录的理由里，用于日后定阈值。
+ *
+ * 公平价不可用（缺初盘快照）时余量为 null，一律放行——缺数据不是拒绝的理由，
+ * 这一点与 next-line 的 no_snapshot 保持一致。
+ */
+export function evaluateFairMargin(
+  limitPrice: number,
+  fairProb: number | null | undefined,
+  p: Pick<AutoTradeParams, 'minFairMargin'>,
+): { margin: number | null; reason: string | null; note: string } {
+  if (fairProb == null || !Number.isFinite(fairProb)) {
+    return { margin: null, reason: null, note: '公平价不可用(缺初盘快照)' }
+  }
+  const margin = fairProb - limitPrice
+  const note = `公平价${fairProb.toFixed(3)} − 买价${limitPrice.toFixed(4)} = 余量${margin >= 0 ? '+' : ''}${margin.toFixed(3)}`
+  const floor = p.minFairMargin
+  if (floor == null) return { margin, reason: null, note: `${note}[观测模式,不拦]` }
+  // 1e-9 容差：两个小数相减带浮点残差（0.85 − 0.80 = 0.049999999999999996），
+  // 恰好等于下限的应当放行。价格最小刻度是 0.001，这点容差改变不了任何真实判断。
+  if (margin < floor - 1e-9) {
+    return { margin, reason: `${note} < 下限${floor}，市场价高于公平价过多`, note }
+  }
+  return { margin, reason: null, note }
+}
+
+/**
  * 比赛时钟闸：开哨后不足 minMatchMinute 分钟就不买。
  *
  * 这一闸的目的不是提高胜率，是提高资金周转。见 types.ts 里 minMatchMinute 的注释

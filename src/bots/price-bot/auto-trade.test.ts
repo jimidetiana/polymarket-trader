@@ -14,6 +14,8 @@ import {
   computeOrderSize,
   evaluateBookQuality,
   evaluateMatchClock,
+  evaluateDeadBand,
+  evaluateFairMargin,
   rollBuyDice,
   resolveAutoTradeParams,
   classifyBookState,
@@ -542,4 +544,107 @@ test('阈值口径涵盖旧的面数口径：六面筛 ≡ 阈值 1/6', () => {
   const t = 1 / 6
   assert.equal(rollBuyDice(t, 0, 0, seq(0.16)).hit, true)     // 0.16 < 0.1667
   assert.equal(rollBuyDice(t, 0, 0, seq(0.17)).hit, false)
+})
+
+// ==================== 死区闸门 ====================
+//
+// 用例价位取自 92 个盘口的实测分档：0.70~0.85 净利 +28.37（须放行）、
+// 0.85~0.93 净亏 −13.35（须拦）、0.93+ 胜率 100%（须放行）。
+
+const DB = DEFAULT_AUTO_TRADE
+
+test('死区内拒绝：0.85~0.93 是实测唯一净亏的价格带', () => {
+  for (const price of [0.85, 0.87, 0.89, 0.9, 0.9299]) {
+    const r = evaluateDeadBand(price, DB)
+    assert.ok(r, `${price} 应被拦，实际放行`)
+    assert.match(r!, /死区/)
+  }
+})
+
+test('死区下方放行：0.70~0.85 是实测最赚的一档，绝不能误杀', () => {
+  for (const price of [0.7, 0.78, 0.8299, 0.8499]) {
+    assert.equal(evaluateDeadBand(price, DB), null, `${price} 应放行`)
+  }
+})
+
+test('死区上方放行：0.93+ 是真结算，胜率 100%', () => {
+  for (const price of [0.93, 0.947, 0.96, 0.99]) {
+    assert.equal(evaluateDeadBand(price, DB), null, `${price} 应放行`)
+  }
+})
+
+test('死区边界：下界闭、上界开', () => {
+  assert.ok(evaluateDeadBand(0.85, DB), '下界本身在死区内')
+  assert.equal(evaluateDeadBand(0.93, DB), null, '上界本身不在死区内')
+})
+
+test('上界不高于下界视为禁用', () => {
+  const off = { deadBandLow: 0.85, deadBandHigh: 0.85 }
+  assert.equal(evaluateDeadBand(0.87, off), null)
+  assert.equal(evaluateDeadBand(0.9, { deadBandLow: 0.93, deadBandHigh: 0.85 }), null)
+})
+
+test('参数缺失视为禁用，不影响未配置的旧规则', () => {
+  assert.equal(evaluateDeadBand(0.88, {}), null)
+})
+
+test('自定义死区边界生效', () => {
+  const wide = { deadBandLow: 0.85, deadBandHigh: 0.95 }
+  assert.ok(evaluateDeadBand(0.94, wide), '放宽上界后 0.94 应被拦')
+  assert.equal(evaluateDeadBand(0.96, wide), null)
+})
+
+test('死区默认值就是回测出来的 0.85~0.93', () => {
+  assert.equal(DEFAULT_AUTO_TRADE.deadBandLow, 0.85)
+  assert.equal(DEFAULT_AUTO_TRADE.deadBandHigh, 0.93)
+})
+
+// ==================== 余量闸门 ====================
+
+test('观测模式（minFairMargin=null）：算出余量但不拦', () => {
+  const r = evaluateFairMargin(0.88, 0.21, { minFairMargin: null })
+  assert.equal(r.reason, null, '观测模式不得拦截')
+  assert.ok(r.margin != null && Math.abs(r.margin - (0.21 - 0.88)) < 1e-9)
+  assert.match(r.note, /观测模式/)
+})
+
+test('公平价缺失（无初盘快照）时放行且余量为 null', () => {
+  const r = evaluateFairMargin(0.88, null, { minFairMargin: 0 })
+  assert.equal(r.reason, null, '缺数据不是拒绝的理由')
+  assert.equal(r.margin, null)
+  assert.match(r.note, /缺初盘快照/)
+})
+
+test('启用后：余量低于下限则拒绝', () => {
+  const r = evaluateFairMargin(0.88, 0.21, { minFairMargin: 0 })
+  assert.ok(r.reason, '公平价 0.21 远低于买价 0.88，应拒绝')
+  assert.match(r.reason!, /市场价高于公平价过多/)
+})
+
+test('启用后：余量达标则放行', () => {
+  // 实测最赚的一档：买价 0.78、公平价更高 → 正余量
+  const r = evaluateFairMargin(0.78, 0.9, { minFairMargin: 0 })
+  assert.equal(r.reason, null)
+  assert.ok(r.margin != null && r.margin > 0)
+})
+
+test('余量恰等于下限时放行（下限是闭区间）', () => {
+  const r = evaluateFairMargin(0.8, 0.85, { minFairMargin: 0.05 })
+  assert.equal(r.reason, null)
+})
+
+test('余量闸门默认为观测模式，不改变现有行为', () => {
+  assert.equal(DEFAULT_AUTO_TRADE.minFairMargin, null)
+})
+
+test('note 里带上公平价与买价，便于事后定阈值', () => {
+  const r = evaluateFairMargin(0.885, 0.79, { minFairMargin: null })
+  assert.match(r.note, /0\.79/)
+  assert.match(r.note, /0\.885/)
+})
+
+test('NaN 公平价按缺失处理', () => {
+  const r = evaluateFairMargin(0.88, Number.NaN, { minFairMargin: 0 })
+  assert.equal(r.reason, null)
+  assert.equal(r.margin, null)
 })

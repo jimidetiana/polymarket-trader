@@ -457,6 +457,9 @@ export default function PriceBotPage() {
         `单笔上限：${d?.maxSize ?? '?'} / 每盘口 ${d?.maxOrdersPerRule ?? '?'} 笔 / 每日 ${d?.maxOrdersPerDay ?? '?'} 笔\n` +
         `每日名义额上限：${d?.maxDailyNotional ?? '?'} USDC\n` +
         `买入价区间：${d?.minBuyPrice ?? 0} ~ ${d?.maxBuyPrice ?? '?'}，价差上限 ${d?.maxSpread ?? 0}\n` +
+        ((d?.deadBandHigh ?? 0) > (d?.deadBandLow ?? 0)
+          ? `死区（不下单）：${d?.deadBandLow} ~ ${d?.deadBandHigh}\n`
+          : `死区：未启用\n`) +
         (d?.buyOrderMode === 'maker'
           ? `买入方式：挂单（bestBid + ${d?.makerTickOffset ?? 1} tick，等成交，约一半下不出去）\n\n`
           : `买入方式：吃单（穿价，优先保成交）\n\n`) +
@@ -1550,6 +1553,17 @@ function AutoTradePanel({
         <NumField label="买入价上限" value={draft.maxBuyPrice} onChange={(v) => set('maxBuyPrice', v)} step={0.01} />
         <NumField label="买入价下限" value={draft.minBuyPrice} onChange={(v) => set('minBuyPrice', v)} step={0.05} />
         <NumField label="最大买卖价差" value={draft.maxSpread} onChange={(v) => set('maxSpread', v)} step={0.01} />
+        <NumField label="死区下界" value={draft.deadBandLow} onChange={(v) => set('deadBandLow', v)} step={0.01} />
+        <NumField label="死区上界" value={draft.deadBandHigh} onChange={(v) => set('deadBandHigh', v)} step={0.01} />
+        <NumField label="公平价余量下限" value={draft.minFairMargin ?? undefined} onChange={(v) => set('minFairMargin', v)} step={0.05} />
+        <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
+          死区 [下界, 上界) 内不下单：这段的价已按结算价定，但线多半还没打出。
+          92 个盘口实测，0.85~0.93 这一档胜率 79.3%，而这个价位要 88.5% 才平衡，是唯一净亏的一档，
+          它两侧（0.70~0.85 和 0.93 以上）都盈利，所以不能靠调「买入价上限」代替。
+          把上界填成不高于下界即关闭该闸门。
+          「公平价余量下限」要求 公平价 − 买价 ≥ 该值；留空为观测模式，只在跳过原因里记余量、不拦单
+          （初盘快照 2026-09-04 才开始积累，阈值还没有样本可回测）。
+        </p>
         {isMaker && (
           <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3 lg:col-span-5">
             挂高 1 个 tick 是自己占一档，排在队首，中位等待 67 秒；填 0 是并到 bestBid 上排队尾，

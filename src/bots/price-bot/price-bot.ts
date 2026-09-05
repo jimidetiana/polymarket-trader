@@ -38,6 +38,7 @@ import {
   getAutoOrderCounts,
   listAutoOrders,
   getAutoOrderSummary,
+  getLineSnapshots,
   listRestingBuyOrders,
 } from './db.js';
 import { placeOrder, cancelOrder } from '../../soccer/trading.js';
@@ -46,12 +47,20 @@ import {
   computeBuyLimitPrice,
   computeOrderSize,
   evaluateBookQuality,
+  evaluateDeadBand,
+  evaluateFairMargin,
   evaluateMatchClock,
   rollBuyDice,
   MIN_ORDER_SHARES,
   MIN_ORDER_NOTIONAL,
 } from './auto-trade.js';
-import { isSurgeMuted, extendMuteUntil } from './next-line.js';
+import {
+  isSurgeMuted,
+  extendMuteUntil,
+  inferLambdaFromOver25,
+  fairNextGoalProb,
+} from './next-line.js';
+import { matchMinuteFrom } from './goal-lines.js';
 import { stepAutoSettle, resolveAutoSettleParams } from './auto-settle.js';
 import { DEFAULT_CONFIG, DEFAULT_AUTO_TRADE } from './types.js';
 import type {
@@ -1590,6 +1599,28 @@ async function reserveBuyOrder(
     return
   }
 
+  // ---- 死区：已按结算价定价但线未打出的区间 ----
+  // 排在 maxBuyPrice 之后是刻意的：死区之上（0.93+）是真结算、100% 胜率，
+  // 若排在前面，那些本该被 maxBuyPrice 记成「利润空间不足」的会被误记成死区，
+  // 归因又被掩盖。两者拦的是不同东西。
+  const dead = evaluateDeadBand(priced.price, p)
+  if (dead) {
+    await finish('skipped', priced.price, 0, dead)
+    return
+  }
+
+  // ---- 余量闸门（当前为观测模式，只记录不拦）----
+  // 公平价由初盘 Over 2.5 反推，缺快照时为 null → 放行。
+  // margin 无论是否拦截都写进理由，用于日后确定阈值并取代死区。
+  const fairMargin = evaluateFairMargin(priced.price, await lookupFairProb(rule), p)
+  if (fairMargin.reason) {
+    await finish('skipped', priced.price, 0, fairMargin.reason)
+    return
+  }
+  // 观测模式下 reason 是 null，若不在这里把 note 带进真实下单的理由里，
+  // 就什么样本都攒不到，日后也就无从定阈值——观测本身才是这一步的目的。
+  const withMargin = (reason: string) => `${reason}｜${fairMargin.note}`
+
   // ---- 规模换算：usdc 口径按限价折成份数 ----
   const size = computeOrderSize(priced.price, p)
   if (!(size > 0)) {
@@ -1644,7 +1675,9 @@ async function reserveBuyOrder(
       const roll = rollBuyDice(p.buyDiceThreshold, p.buyDiceRamp, diceMisses)
       diceMisses = roll.misses
       if (!roll.hit) {
-        await finish('skipped', priced.price, size, roll.reason)
+        // 筛子只是限流，被它挡掉的是「各闸门都过了」的真机会，
+        // 余量分布该把它算进去，否则样本会偏向摇中的那一小部分。
+        await finish('skipped', priced.price, size, withMargin(roll.reason))
         return
       }
       diceNote = ` ${roll.reason}`
@@ -1665,7 +1698,7 @@ async function reserveBuyOrder(
           result.simulated ? 'simulated' : 'placed',
           priced.price,
           size,
-          `定价=${priced.basis} ${result.message}${diceNote}`,
+          withMargin(`定价=${priced.basis} ${result.message}${diceNote}`),
           { tradeOrderId: result.orderId ?? null, clobOrderId: result.clobOrderId ?? null },
         )
         console.log(
@@ -1674,7 +1707,7 @@ async function reserveBuyOrder(
         )
       } else {
         await finish('failed', priced.price, size,
-          `下单被拒：${result.message}`, { tradeOrderId: result.orderId ?? null })
+          withMargin(`下单被拒：${result.message}`), { tradeOrderId: result.orderId ?? null })
         console.warn(`[PriceBot] 自动下单失败 rule=${rule.id}: ${result.message}`)
       }
     } catch (err: any) {
@@ -2313,6 +2346,50 @@ export function muteSurgeSignals(ruleId: number, durationMs: number): boolean {
   if (!monitor) return false
   monitor.surgeMutedUntil = extendMuteUntil(monitor.surgeMutedUntil, durationMs)
   return true
+}
+
+// ==================== 公平价查询（余量闸门用）====================
+
+/**
+ * 初盘快照缓存：按 eventId 存 Over 2.5 的开哨价。
+ *
+ * 每次买入信号都读库没必要——同一场比赛的初盘价是定值（快照表 INSERT IGNORE，
+ * 首次写入即定稿）。null 表示查过但这场没有快照，不再重复查。
+ */
+const kickoffOver25Cache = new Map<string, number | null>()
+
+/**
+ * 算出当前档位的公平价，供余量闸门使用。查不到返回 null（放行）。
+ *
+ * **goalsNeeded 取 1**，即假设「再进一球就打出这一档」。这是最宽松的假设——
+ * 需要的球越多公平价越低、余量越负。观测模式下宁可高估公平价：
+ * 若连最宽松的假设都算出负余量，那这笔买入才真的可疑。
+ *
+ * 精确的 goalsNeeded 需要实时比分，price-bot 目前不接比分源。
+ */
+async function lookupFairProb(rule: PriceMonitorRule): Promise<number | null> {
+  const line = rule.line
+  if (line == null || !Number.isFinite(line)) return null
+
+  let kickoff = kickoffOver25Cache.get(rule.eventId)
+  if (kickoff === undefined) {
+    try {
+      const snaps = await getLineSnapshots(rule.eventId)
+      kickoff = snaps.get(2.5)?.overPrice ?? null
+    } catch (err: any) {
+      console.error(`[PriceBot] 读初盘快照失败 event=${rule.eventId}:`, err?.message ?? err)
+      return null // 不缓存失败，下次重试
+    }
+    kickoffOver25Cache.set(rule.eventId, kickoff)
+  }
+  if (kickoff == null) return null
+
+  const lambdaFull = inferLambdaFromOver25(kickoff)
+  if (lambdaFull == null) return null
+
+  const minute = matchMinuteFrom(rule.endTime)
+  const fair = fairNextGoalProb(lambdaFull, 1, minute)
+  return fair?.fairProb ?? null
 }
 
 // ==================== 自动完结 ====================

@@ -937,6 +937,21 @@ export interface AutoTradeParams {
   maxSpread?: number
   /** 相对 bestBid 的最大溢价，限制穿价能让到多高。0 = 不校验 */
   maxPremiumOverBid?: number
+  /**
+   * 死区下界（含）。落在 [deadBandLow, deadBandHigh) 的买价一律不下单。
+   * 这一段的价已按结算价定，但线多半还没打出：92 盘口实测胜率 79.3%，
+   * 而这个价位要 88.5% 才平衡，是唯一净亏的一档，两侧都盈利。
+   * 把上界设成 ≤ 下界即关闭该闸门。
+   */
+  deadBandLow?: number
+  /** 死区上界（不含）。默认 0.93，往上是真结算（实测胜率 100%），必须放行 */
+  deadBandHigh?: number
+  /**
+   * 公平价余量下限：要求 fairProb − 买价 ≥ 此值。
+   * null = 只记录余量不拦截（观测模式）。初盘快照 2026-09-04 才开始积累，
+   * 阈值暂时无法回测，先攒样本。
+   */
+  minFairMargin?: number | null
   /** 每盘口累计最多下单笔数 */
   maxOrdersPerRule?: number
   /** 全局每日最多下单笔数 */

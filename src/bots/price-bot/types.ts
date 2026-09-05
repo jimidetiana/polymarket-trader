@@ -83,6 +83,43 @@ export interface AutoTradeParams {
    * 设 0 表示不限制（退回纯 ask 穿价）。
    */
   maxPremiumOverBid?: number
+  /**
+   * 死区下界：买入价落在 [deadBandLow, deadBandHigh) 内一律拒绝。
+   *
+   * 这一段是「已按结算价定价、但线实际没打出」的区间。实测 92 个盘口分档：
+   *   买价 0.70~0.85  n=26 胜率 96.2% 平衡需 78.0% → 余量 +18pp  净利 +28.37
+   *   买价 0.85~0.93  n=29 胜率 79.3% 平衡需 88.5% → 余量  −9pp  净利 −13.35
+   *   买价 0.93~1.01  n=31 胜率 100%  平衡需 94.7% → 余量  +5pp  净利  +9.11
+   * 亏损**全部**集中在中间这一格，两侧都赚，且在 0.5/1.5/2.5 三个档位上一致
+   * （各 −12~−13pp）。30 笔来自 30 个不同盘口 / 26 场比赛，不是重复触发的假象。
+   * 拦掉它：净利 +24.14 → +37.49，ROI 5.7% → 12.5%。
+   *
+   * 机制：低档进球把高档价格抬到 0.85~0.93，看起来像刚结算，实际那条线还没打出。
+   * 6 笔亏损里有 4 笔发生在第 9/29/30/38 分钟——第 29 分钟的 Over 0.5 报 0.87，
+   * 那个时间点这个价格是荒谬的。
+   *
+   * 注意这不是「买贵了」那么简单：0.93 以上更贵却是 100% 胜率（真结算了）。
+   * 所以不能用 maxBuyPrice 替代，必须是个区间。
+   *
+   * 设成与 deadBandHigh 相等即禁用。n=29 在统计上不算铁证，
+   * 攒够初盘快照后应由 minFairMargin 取代（那是同一机制的动态版）。
+   */
+  deadBandLow?: number
+  /** 死区上界（不含）。见 deadBandLow。 */
+  deadBandHigh?: number
+  /**
+   * 余量闸门：要求 公平价 − 买入价 ≥ 该值，否则拒绝。
+   *
+   * 这是 deadBandLow/High 的动态版——死区之所以亏，正是因为那个价位上
+   * 市场价超出公平价最多。用余量表达就不必写死价格区间，能随比赛的
+   * 进球分布、剩余时间、还需几球自动调整。
+   *
+   * **当前为观测模式**：设 null 表示只记录余量、不拦截。
+   * 原因是公平价要靠 price_bot_line_snapshots 的初盘快照，而快照 2026-09-04
+   * 才开始攒，历史样本上无法回测阈值。等积累到足够场次再改成真拦，
+   * 同时删掉死区那两个参数。
+   */
+  minFairMargin?: number | null
   /** 每条规则累计最多下单笔数（跨重启，从库里数） */
   maxOrdersPerRule?: number
   /** 全局每日最多下单笔数（跨重启，按自然日 UTC 数） */
@@ -204,6 +241,11 @@ export const DEFAULT_AUTO_TRADE: Required<AutoTradeParams> = {
   maxSpread: 0.1,
   // 0.04：容得下正常价差 + 穿价缓冲，又挡住「bid 0.85 / ask 0.97」这类接盘。
   maxPremiumOverBid: 0.04,
+  // 死区 0.85~0.93：实测亏损全部集中在这一格（详见 deadBandLow 的注释）
+  deadBandLow: 0.85,
+  deadBandHigh: 0.93,
+  // null = 只记录余量不拦截。公平价缺历史快照，阈值无法回测，先观测。
+  minFairMargin: null,
   maxOrdersPerRule: 2,
   maxOrdersPerDay: 20,
   maxDailyNotional: 200,
