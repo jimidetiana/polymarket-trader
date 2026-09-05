@@ -1890,12 +1890,19 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
   // 闸门是比分。所以下面即使 open=true 也照旧 autoTradeEnabled=false。
   const snapshots = await getLineSnapshots(rule.eventId).catch(() => new Map());
   const [evRows] = await pool.execute<any[]>(
-    `SELECT start_time, end_time FROM soccer_events WHERE id = ?`,
+    `SELECT end_time FROM soccer_events WHERE id = ?`,
     [rule.eventId],
   );
-  // start_time 优先；缺失时退 end_time（它是取整到整点/半点的计划开哨时刻，
-  // 与 auto-trade.ts evaluateMatchClock 同口径，带最多 ±30 分钟取整误差）
-  const kickoff = evRows[0]?.start_time ?? evRows[0]?.end_time ?? null;
+  // 开哨时间取 end_time，**不是** start_time。
+  //
+  // 这两列的名字是反直觉的：start_time 是**挂牌日期**（实测离下单 1927~65142
+  // 分钟，最长一个多月），end_time 才是计划开哨时刻（实测下单落在它之后
+  // 2~70 分钟，正好在 90 分钟比赛窗口内）。用 start_time 会算出「已过一万多
+  // 分钟」，衰减为 0、公平价为 0，于是每一次完结都被判成 low_fair_prob 不开档。
+  //
+  // 与 auto-trade.ts evaluateMatchClock 同口径：end_time 取整到整点/半点，
+  // 所以算出的分钟数带最多 ±30 分钟误差，设阈值要留余量。
+  const kickoff = evRows[0]?.end_time ?? null;
 
   const decision = decideNextLineOpening({
     settledLine: curLine,
