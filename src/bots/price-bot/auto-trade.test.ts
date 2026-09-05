@@ -452,6 +452,19 @@ test('闸门理由里带上「占用有限资金」，与 9.24 的动机一致',
   assert.match(evaluateMatchClock(KICK, 30, at(5))!, /占用有限资金/)
 })
 
+test('裸 DATETIME 串按 UTC 解析：本机 UTC+8 时不能白多 480 分钟', () => {
+  // 这一闸是「时间不够就拦」，多算 480 分钟会让它永远放行——
+  // 静默失效比误拦更难发现，所以必须和 matchMinuteFrom 同口径。
+  const now = Date.parse('2026-09-05T11:10:00Z')
+  // 真实开哨 11:00 UTC，此刻第 10 分钟，下限 30 → 必须拦
+  assert.match(evaluateMatchClock('2026-09-05 11:00:00', 30, now)!, /开哨后仅10分钟/)
+  // 与带 Z 的写法等价
+  assert.equal(
+    evaluateMatchClock('2026-09-05 11:00:00', 30, now),
+    evaluateMatchClock('2026-09-05T11:00:00Z', 30, now),
+  )
+})
+
 // ==================== 买入筛子 ====================
 
 /** 固定随机源：依次返回给定的 [0,1) 值，用完抛错（防止测试悄悄多摇一次） */

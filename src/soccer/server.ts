@@ -87,7 +87,7 @@ import {
   matchMinuteFrom,
 } from '../bots/price-bot/goal-lines.js';
 import { decideNextLineOpening, buyGateReason } from '../bots/price-bot/next-line.js';
-import { saveLineSnapshots, getLineSnapshots } from '../bots/price-bot/db.js';
+import { saveLineSnapshots, getLineSnapshots, recordLog } from '../bots/price-bot/db.js';
 import type { LineSnapshot } from '../bots/price-bot/db.js';
 import { fetchRealOrderReport, listRealOrderReportLeagues } from '../bots/price-bot/report.js';
 import { config } from '../config.js';
@@ -1991,6 +1991,9 @@ app.post('/api/bots/price-bot/rules/:id/settle', asyncHandler(async (req, res) =
  * 「新档不授权下单」这些规则不会在两条路径间分叉。
  */
 registerAutoSettleExecutor(async (ruleId: number) => {
+  // 完结前先取规则：settleRuleAndAdvance 会把它停掉禁用掉，
+  // 之后再查虽然还在，但把「记日志要用的身份」在动手前拿到手更稳。
+  const before = await getRule(ruleId);
   const out = await settleRuleAndAdvance(ruleId, { wantNext: true, autoStart: true });
   if (!out.ok) {
     console.error(`[PriceBot] 自动完结失败 rule=${ruleId}: ${out.error}`);
@@ -2000,10 +2003,36 @@ registerAutoSettleExecutor(async (ruleId: number) => {
     ? `→ 已开 Over ${out.next.line}（规则 #${out.next.ruleId}，` +
       `${out.next.started ? '监控已启动' : '监控未启动'}，静默 ${Math.round(out.next.mutedMs / 1000)}s，未授权下单）`
     : '→ 未开下一档';
-  console.log(
-    `[PriceBot] 自动完结 rule=${ruleId} Over ${out.settled.line ?? '?'} ${nextTxt}；` +
-    `判据：${out.reason ?? '无'}`,
-  );
+  const summary =
+    `[自动完结·结果] Over ${out.settled.line ?? '?'} ${nextTxt}；判据：${out.reason ?? '无'}` +
+    (out.decision
+      ? `（${out.decision.reasonCode}` +
+        `${out.decision.fairProb != null ? ` 公平价${out.decision.fairProb.toFixed(3)}` : ''}` +
+        `${out.decision.marketPrice != null ? ` 市场价${out.decision.marketPrice.toFixed(3)}` : ''}` +
+        `${out.decision.goalsNeeded != null ? ` 还需${out.decision.goalsNeeded}球` : ''}）`
+      : '');
+  console.log(`[PriceBot] 自动完结 rule=${ruleId} ${summary}`);
+
+  // 结果必须落库：只打 console 的话，前端看到的就只是「盘口自己停了」，
+  // 没有下一档也没有原因——这正是自动完结上线后第一天被当成故障的地方。
+  if (before) {
+    await recordLog({
+      ruleId,
+      tokenId: before.tokenId,
+      eventId: before.eventId,
+      outcome: before.outcome,
+      action: 'trigger',
+      price: null,
+      bestBid: null,
+      bestBidSize: null,
+      bestAsk: null,
+      bestAskSize: null,
+      source: null,   // 这条不是盘口快照，没有数据来源可言
+      detail: summary,
+    }).catch((err: any) => {
+      console.error(`[PriceBot] 自动完结结果日志写入失败 rule=${ruleId}:`, err?.message ?? err);
+    });
+  }
 });
 
 app.put('/api/bots/price-bot/rules/:id', asyncHandler(async (req, res) => {

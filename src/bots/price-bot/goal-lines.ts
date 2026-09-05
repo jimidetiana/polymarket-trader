@@ -98,19 +98,40 @@ export function nextTotalGoalLine(line: number | null | undefined): number | nul
 }
 
 /**
+ * 把时间戳解析成毫秒，**裸 DATETIME 串按 UTC 处理**。
+ *
+ * MySQL 的 DATETIME 取出来是 '2026-09-05 11:00:00' 这种不带时区后缀的串，
+ * 而 Date.parse 对非 ISO 格式按**本机时区**解析。本机是 UTC+8，于是每个
+ * 开哨时刻都被当成北京时间，算出的比赛分钟凭空多 480 分钟——比赛全都显示
+ * 在第 540 分钟以后，早过了 90 分钟，衰减把公平价压成 0，递进判断于是
+ * 一律 low_fair_prob 不开档。库里存的是 UTC（与 db.ts toIsoUtc 同口径：
+ * 它给裸串补的是 Z），所以这里也必须补 Z 而不是交给本机时区。
+ *
+ * 已带 Z 或 ±HH:MM 后缀的原样解析，所以对 ISO 串是幂等的。
+ */
+export function parseUtcish(raw: string | Date | null | undefined): number | null {
+  if (raw == null) return null
+  if (raw instanceof Date) return raw.getTime()
+  const s = String(raw).trim()
+  if (!s) return null
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(s)
+  const t = Date.parse(hasZone ? s : `${s.replace(' ', 'T')}Z`)
+  return Number.isFinite(t) ? t : null
+}
+
+/**
  * 从开哨时刻推算当前是比赛第几分钟。
  *
- * kickoff 用 soccer_events.start_time，缺失时调用方可退 end_time
- * （见 auto-trade.ts evaluateMatchClock 的取整误差说明）。
+ * kickoff 用 soccer_events.end_time（那一列才是计划开哨时刻，start_time 是
+ * 挂牌日期），取整到整点/半点，所以带最多 ±30 分钟误差。
  * 返回 null 表示算不出来——调用方必须把它当「未知」而不是 0。
  */
 export function matchMinuteFrom(
-  kickoff: string | null | undefined,
+  kickoff: string | Date | null | undefined,
   now: number = Date.now(),
 ): number | null {
-  if (!kickoff) return null
-  const t = Date.parse(kickoff)
-  if (!Number.isFinite(t)) return null
+  const t = parseUtcish(kickoff)
+  if (t == null) return null
   const elapsed = (now - t) / 60_000
   if (elapsed < 0) return 0 // 还没开哨
   return elapsed

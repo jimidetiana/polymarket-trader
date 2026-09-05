@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_AUTO_TRADE } from './types.js'
+import { parseUtcish } from './goal-lines.js'
 import type { AutoTradeParams, PriceSnapshot, PriceMonitorRule } from './types.js'
 
 /**
@@ -323,14 +324,17 @@ export function evaluateFairMargin(
  * 返回 null 表示通过（含未启用、缺开哨时间、时间无法解析）。
  */
 export function evaluateMatchClock(
-  kickoff: string | null | undefined,
+  kickoff: string | Date | null | undefined,
   minMatchMinute: number,
   now: number = Date.now(),
 ): string | null {
   if (!(minMatchMinute > 0)) return null
   if (!kickoff) return null                      // 没有开哨时间就不拦，避免闸门变成静默全禁
-  const t = Date.parse(kickoff)
-  if (!Number.isFinite(t)) return null
+  // 裸 DATETIME 串按 UTC 解析，不能交给本机时区——详见 goal-lines.ts parseUtcish。
+  // 这一闸方向上是「时间越少越拦」，多算 480 分钟会让闸门静默失效（永远放行），
+  // 比递进那边更隐蔽，所以两处必须同口径。
+  const t = parseUtcish(kickoff)
+  if (t == null) return null
   const elapsed = (now - t) / 60000
   if (elapsed >= minMatchMinute) return null
   return `开哨后仅${elapsed.toFixed(0)}分钟 < 下限${minMatchMinute}，` +

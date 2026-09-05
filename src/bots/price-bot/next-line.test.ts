@@ -22,6 +22,7 @@ import {
   extractTotalGoalLine,
   nextTotalGoalLine,
   matchMinuteFrom,
+  parseUtcish,
   TOTAL_GOAL_LINES,
 } from './goal-lines.js'
 
@@ -399,4 +400,38 @@ test('比赛分钟从开哨时刻现算，未开哨为 0，缺时间为 null', (
   assert.equal(matchMinuteFrom('2026-09-04T21:00:00Z', now), 0)
   assert.equal(matchMinuteFrom(null, now), null)
   assert.equal(matchMinuteFrom('not-a-date', now), null)
+})
+
+test('裸 DATETIME 串按 UTC 解析，不跟本机时区走', () => {
+  // 这是实测把 11 次自动完结全判成 low_fair_prob 的那个 bug：
+  // 本机 UTC+8 时，Date.parse('2026-09-05 11:00:00') 会当成北京时间，
+  // 算出的分钟凭空多 480，比赛显示在第 543 分钟，衰减把公平价压成 0。
+  const now = Date.parse('2026-09-05T12:03:00Z')
+  assert.equal(matchMinuteFrom('2026-09-05 11:00:00', now), 63)
+  // 与带 Z 的写法必须完全等价
+  assert.equal(
+    matchMinuteFrom('2026-09-05 11:00:00', now),
+    matchMinuteFrom('2026-09-05T11:00:00Z', now),
+  )
+})
+
+test('带时区后缀的原样解析，对 ISO 串幂等', () => {
+  const now = Date.parse('2026-09-05T12:00:00Z')
+  assert.equal(matchMinuteFrom('2026-09-05T11:00:00Z', now), 60)
+  // +08:00 的 11:00 就是 UTC 03:00，应当算出 540，而不是被再补一次 Z
+  assert.equal(matchMinuteFrom('2026-09-05T11:00:00+08:00', now), 540)
+})
+
+test('Date 对象直接取时间戳', () => {
+  const now = Date.parse('2026-09-05T12:00:00Z')
+  assert.equal(matchMinuteFrom(new Date('2026-09-05T11:30:00Z'), now), 30)
+})
+
+test('parseUtcish 对空值与坏串返回 null，不返回 0', () => {
+  // 返回 0 会被调用方当成「刚开哨」，比返回 null 危险
+  assert.equal(parseUtcish(null), null)
+  assert.equal(parseUtcish(undefined), null)
+  assert.equal(parseUtcish(''), null)
+  assert.equal(parseUtcish('   '), null)
+  assert.equal(parseUtcish('not-a-date'), null)
 })
