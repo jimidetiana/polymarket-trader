@@ -1224,7 +1224,7 @@ export interface SettleRuleResult {
   decision?: {
     reasonCode:
       | 'no_next_line' | 'score_behind' | 'no_snapshot' | 'thin_book'
-      | 'cheap_kickoff' | 'low_fair_prob' | 'shadow_hot' | 'ok'
+      | 'cheap_kickoff' | 'low_fair_prob' | 'shadow_hot' | 'cheap_value' | 'ok'
     nextLine: number | null
     lambdaFull: number | null
     fairProb: number | null

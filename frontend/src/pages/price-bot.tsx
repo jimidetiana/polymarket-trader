@@ -531,11 +531,15 @@ export default function PriceBotPage() {
           ? `买入信号静默 ${Math.round(r.next.mutedMs / 1000)} 秒——刚完结那波涨幅属于上一档，不是这一档的进球。\n\n`
           : ''
         // shadow_hot：现价明显贵于公平价，是更低档涨幅的影子。此时授权就是样本里那几笔亏损的形态。
+        // cheap_value 与它公平价一样低，但价格没虚高——是尾盘绝杀形态，提示的是机会不是风险。
         const warn = d?.reasonCode === 'shadow_hot'
           ? `⚠ 现价远高于公平价，这是上一档涨幅的影子，此价位不要授权下单。\n\n`
           : d?.reasonCode === 'no_snapshot'
             ? `⚠ 缺初盘快照，无法计算公平价，暂不要授权下单。\n\n`
-            : ''
+            : d?.reasonCode === 'cheap_value'
+              ? `尾盘低价形态：公平价低但现价没跟着虚高，实测这一批是唯一稳定为正的。\n` +
+                `注意只有卖价同样便宜才有正边——低买价常是没撤的陈旧挂单，成交要吃卖价。\n\n`
+              : ''
         alert(
           `已完结 Over ${r.settled.line ?? '?'}，接上 Over ${r.next.line}` +
           `（${r.next.started ? '已开始监控' : '创建成功但未能启动监控，请手动启动'}）${priceLine}\n\n` +
