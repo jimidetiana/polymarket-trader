@@ -742,6 +742,48 @@ function stopBookRefresh(): void {
   }
 }
 
+/**
+ * 一批 token 一次 POST /books，最多这么多个一批。
+ *
+ * 实测只验到 14 个（响应 8.6KB），102 个并发时的行为没验过，
+ * 所以留个上限分批，避免整批被服务端拒掉。分批失败还有单发兜底。
+ */
+const BOOKS_BATCH_SIZE = 50;
+
+/**
+ * 批量取 book。返回 asset_id -> book 的映射。
+ *
+ * 服务端对已下市/无效的 token 是**静默丢弃**（实测传 2 个只回 1 本），
+ * 不是整批报错。所以必须按 asset_id 对齐，不能按下标——顺序一致是巧合。
+ */
+async function fetchBooksBatch(tokenIds: string[]): Promise<Map<string, any>> {
+  const out = new Map<string, any>();
+  for (let i = 0; i < tokenIds.length; i += BOOKS_BATCH_SIZE) {
+    const chunk = tokenIds.slice(i, i + BOOKS_BATCH_SIZE);
+    const resp = await restAxios.post('/books', chunk.map((token_id) => ({ token_id })));
+    const arr = Array.isArray(resp.data) ? resp.data : [];
+    for (const book of arr) {
+      if (book?.asset_id) out.set(String(book.asset_id), book);
+    }
+  }
+  return out;
+}
+
+/**
+ * 断联期/定期补拉都走这里取盘口。
+ *
+ * 为什么是 POST /books 而不是 N 个 GET /book：实测同样拉 14 个 token 一轮，
+ * 单发 105.8KB、批量 11.9KB，**省 88.8%**。省的不是 payload——单本书 JSON 只
+ * 1.4KB，14 本约 20KB——而是每请求约 6KB 的 TLS 证书链和 CONNECT 开销，
+ * 占了现状字节的 81%。批量把 14 次握手压成 1 次。
+ *
+ * 试过给代理 agent 开 keepAlive，无效（−0.1%）：CONNECT 隧道与目标绑定，
+ * https-proxy-agent@7 每个请求仍新开一条隧道。所以减字节只能减请求数。
+ *
+ * 也试过 POST /prices（只要价格不要深度），只比 /books 再省 1.3KB，
+ * 却要丢掉 best_bid_size/best_ask_size——而补深度正是 startBookRefresh 的目的
+ * （见其注释：size 只有全量 book 快照才有）。不值当，所以保留全量 book。
+ */
 async function pollBooksViaRest(): Promise<void> {
   // 上一轮还没回来就跳过，避免请求堆积
   if (restPollInFlight) return;
@@ -750,16 +792,27 @@ async function pollBooksViaRest(): Promise<void> {
 
   restPollInFlight = true;
   try {
-    const results = await Promise.allSettled(
-      tokenIds.map((tokenId) =>
-        restAxios.get('/book', { params: { token_id: tokenId } })
-          .then((resp) => ({ tokenId, data: resp.data })),
-      ),
-    );
+    let books: Map<string, any>;
+    try {
+      books = await fetchBooksBatch(tokenIds);
+    } catch (err: any) {
+      // 批量挂了就退回单发。断联期瞎着比多跑点字节更糟。
+      console.warn('[PriceBot] POST /books 失败，退回单发 /book:', err.message);
+      books = new Map<string, any>();
+      const results = await Promise.allSettled(
+        tokenIds.map((tokenId) =>
+          restAxios.get('/book', { params: { token_id: tokenId } })
+            .then((resp) => ({ tokenId, data: resp.data })),
+        ),
+      );
+      for (const r of results) {
+        if (r.status !== 'fulfilled' || !r.value.data) continue;
+        books.set(r.value.tokenId, r.value.data);
+      }
+    }
 
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue;
-      const { tokenId, data } = r.value;
+    for (const tokenId of tokenIds) {
+      const data = books.get(tokenId);
       if (!data) continue;
       handleBookSnapshot({ asset_id: tokenId, bids: data.bids, asks: data.asks }, 'rest');
     }
