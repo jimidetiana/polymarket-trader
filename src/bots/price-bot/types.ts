@@ -414,6 +414,13 @@ export interface PriceMonitorRule extends MatchContext {
    * （也可能只是手动关掉）。两者分开存才能区分这两种情况。
    */
   settledAt?: string
+  /**
+   * 链上结算真相：'yes' = 我们买的那一腿结算为 1，'no' = 结算为 0。
+   *
+   * 与 settledAt 的区别：settledAt 是「我们停止监控的时刻」（人工点的或自动完结的），
+   * 这一列是「链上真的结算成什么」。有值即代表代币已归 1 或 0，盘口不会再动。
+   */
+  settledOutcome?: 'yes' | 'no'
   enabled: boolean
   createdAt?: string
   updatedAt?: string

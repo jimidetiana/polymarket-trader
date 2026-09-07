@@ -1064,6 +1064,8 @@ export interface PriceMonitorRule {
   enabled: boolean
   /** 手动完结时刻。有值 = 已完结、等待链上结算 */
   settledAt?: string
+  /** 链上结算真相：'yes' = 我们买的那一腿结算为 1。有值即代表盘口不会再动 */
+  settledOutcome?: 'yes' | 'no'
   createdAt?: string
   updatedAt?: string
   // listRules LEFT JOIN 带出的比赛/盘口上下文（与 MatchContext 一致，均可选）

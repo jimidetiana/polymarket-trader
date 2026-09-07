@@ -361,8 +361,28 @@ async function ensureRuleColumns(): Promise<void> {
 
 // ==================== 规则 CRUD ====================
 
+/**
+ * 「这条规则已经没有可监控的东西了」的唯一定义。SQL 片段，要求 `r`=规则、`e`=赛事。
+ *
+ * 两个独立判据，满足任一即算已结束：
+ *
+ *  1. `settled_outcome` 有值 —— 链上真相已回填，代币已归 1 或 0，盘口不会再动。
+ *  2. 开哨已过 3 小时 —— 链上真相还没回填，但比赛不可能还在打。3 小时的口径与
+ *     listRulesPendingOutcome 一致（90 分钟 + 中场 + 补时 + 结算延迟），
+ *     因为 end_time 存的是**开球**时间而不是终场时间。
+ *
+ * `end_time IS NULL` 不算已结束：赛事行可能被 deleteClosedEvents() 清掉了，
+ * 「查不到开哨时间」不是「比赛已结束」的证据，宁可留着让人工判断。
+ */
+export const FINISHED_RULE_SQL = `(
+  r.settled_outcome IS NOT NULL
+  OR (e.end_time IS NOT NULL AND e.end_time < UTC_TIMESTAMP() - INTERVAL 3 HOUR)
+)`
+
 export async function listRules(options: {
   enabledOnly?: boolean
+  /** 排除已结束的规则（见 FINISHED_RULE_SQL）。启动/批量启动用，避免把已结束的盘拉回监控 */
+  excludeFinished?: boolean
   eventId?: string
   limit?: number
   offset?: number
@@ -375,15 +395,24 @@ export async function listRules(options: {
   if (options.enabledOnly) {
     where.push('r.enabled = 1')
   }
+  if (options.excludeFinished) {
+    where.push(`NOT ${FINISHED_RULE_SQL}`)
+  }
   if (options.eventId) {
     where.push('r.event_id = ?')
     params.push(options.eventId)
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  // 计数也要 JOIN 赛事：excludeFinished 的判据里有 e.end_time。
+  // 用 LEFT JOIN 与下面的明细查询保持一致，否则赛事被清理过的规则会只在其中一边出现，
+  // total 与 rules.length 对不上，前端会误报「被 limit 截断」。
+  const countJoin = options.excludeFinished
+    ? 'LEFT JOIN soccer_events e ON e.id = r.event_id'
+    : ''
 
   const [countRows] = await pool.execute<any[]>(
-    `SELECT COUNT(*) as total FROM price_bot_rules r ${whereSql}`,
+    `SELECT COUNT(*) as total FROM price_bot_rules r ${countJoin} ${whereSql}`,
     params,
   )
   const total = countRows[0]?.total ?? 0
@@ -572,13 +601,80 @@ export async function recordRuleOutcome(ruleId: number, price: number): Promise<
   if (!Number.isFinite(price)) return null
   const outcome = price >= 0.99 ? 'yes' : price <= 0.01 ? 'no' : null
   if (!outcome) return null
+  // 顺手停用并标记待结算。链上已结算意味着代币已归 1 或 0，盘口不会再动，
+  // 监控它没有任何意义。以前这里只写真相不关规则，而唯一会关 enabled 的
+  // settleRuleAndAdvance 要求买价站上 0.99 持稳 30 秒——Over 输了永远等不到，
+  // 于是规则一直挂着 enabled=1，重启后被 startBot 全部拉回监控。
+  // 实测积压 166 条，全是已结束的比赛。
+  //
+  // settled_at 用 COALESCE 保留原值：人工完结时刻是「我看到进球那一刻」，
+  // 比链上回填早得多，不能被这次覆盖掉。
   await pool.execute(
     `UPDATE price_bot_rules
-        SET settled_outcome = ?, settled_price = ?, outcome_synced_at = UTC_TIMESTAMP()
+        SET settled_outcome = ?, settled_price = ?, outcome_synced_at = UTC_TIMESTAMP(),
+            enabled = 0, auto_trade_enabled = 0,
+            settled_at = COALESCE(settled_at, UTC_TIMESTAMP()),
+            updated_at = UTC_TIMESTAMP()
       WHERE id = ?`,
     [outcome, price, ruleId],
   )
   return outcome
+}
+
+/**
+ * 停用所有「已结束却还挂着 enabled=1」的规则，返回被停用的规则 id。
+ *
+ * 启动时跑一次，清掉历史积压：`recordRuleOutcome` 从前只写链上真相不关规则，
+ * 所以 166 条早已结束的盘一直是 enabled=1，每次重启都被 startBot 拉回监控。
+ *
+ * 只停用不删除：触发记录和下单记录要按 rule_id 对账（与 settleRuleAndAdvance 同口径）。
+ * 同时补 settled_at，让它们在列表里排到最后、并显示成「已结算」而不是「监控中」。
+ *
+ * 幂等：跑第二次匹配到 0 条。
+ */
+export async function disableFinishedRules(): Promise<number[]> {
+  await ensureTables()
+  const [rows] = await pool.query<any[]>(
+    `SELECT r.id
+       FROM price_bot_rules r
+       LEFT JOIN soccer_events e ON e.id = r.event_id
+      WHERE r.enabled = 1 AND ${FINISHED_RULE_SQL}`,
+  )
+  const ids = rows.map((r) => Number(r.id))
+  if (!ids.length) return []
+
+  // 按 id 显式改，不用 UPDATE...JOIN：这样被改的行与上面查到的完全一致，
+  // 两条语句之间刚好跨过 3 小时边界的规则不会被静默多改一条。
+  const placeholders = ids.map(() => '?').join(',')
+  await pool.query(
+    `UPDATE price_bot_rules
+        SET enabled = 0, auto_trade_enabled = 0,
+            settled_at = COALESCE(settled_at, UTC_TIMESTAMP()),
+            updated_at = UTC_TIMESTAMP()
+      WHERE id IN (${placeholders})`,
+    ids,
+  )
+  return ids
+}
+
+/**
+ * 单条规则是否已结束（见 FINISHED_RULE_SQL）。
+ *
+ * 给启动路径当闸门用：`enabled=1` 不等于「该跑」，已结算的盘拉起来只会占着
+ * WS 订阅额度并往日志里灌 0.000 的下架价。规则不存在时返回 false，
+ * 让调用方自己去报「规则不存在」这个更准确的错。
+ */
+export async function isRuleFinished(ruleId: number): Promise<boolean> {
+  await ensureTables()
+  const [rows] = await pool.query<any[]>(
+    `SELECT ${FINISHED_RULE_SQL} AS finished
+       FROM price_bot_rules r
+       LEFT JOIN soccer_events e ON e.id = r.event_id
+      WHERE r.id = ?`,
+    [ruleId],
+  )
+  if (!rows.length) return false
+  return Number(rows[0].finished) === 1
 }
 
 export async function deleteRule(id: number): Promise<boolean> {
@@ -1266,6 +1362,7 @@ function rowToRule(row: any): PriceMonitorRule {
     cooldownSeconds: Number(row.cooldown_seconds),
     enabled: row.enabled === 1 || row.enabled === true,
     settledAt: row.settled_at != null ? toIsoUtc(row.settled_at) : undefined,
+    settledOutcome: row.settled_outcome != null ? String(row.settled_outcome) as 'yes' | 'no' : undefined,
     createdAt: toIsoUtc(row.created_at),
     updatedAt: toIsoUtc(row.updated_at),
   }

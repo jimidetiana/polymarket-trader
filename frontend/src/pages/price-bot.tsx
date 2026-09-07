@@ -85,13 +85,14 @@ const MATCH_STATUS_BADGE: Record<string, { label: string; className: string }> =
 }
 
 /** 左侧列表状态过滤标签 */
-type StatusFilterKey = 'all' | 'live' | 'not_started' | 'ended' | 'settled'
+type StatusFilterKey = 'all' | 'live' | 'not_started' | 'ended' | 'settled' | 'resolved'
 const STATUS_FILTER_TABS: { key: StatusFilterKey; label: (c: Record<string, number>) => string }[] = [
   { key: 'all', label: (c) => `全部 (${c.all})` },
   { key: 'live', label: (c) => `进行中 (${c.live})` },
   { key: 'not_started', label: (c) => `即将开始 (${c.not_started})` },
   { key: 'ended', label: (c) => `已结束 (${c.ended})` },
   { key: 'settled', label: (c) => `待结算 (${c.settled})` },
+  { key: 'resolved', label: (c) => `已结算 (${c.resolved})` },
 ]
 
 /** 左侧列表盘口过滤标签：大小球线(0.5–4.5) + 首球(谁先进球) */
@@ -150,15 +151,27 @@ function primaryTitleOf(rule: PriceMonitorRule): string {
 }
 
 /**
- * 机器人运行状态：监控中 / 待结算 / 已停止。
+ * 机器人运行状态：监控中 / 已结算 / 待结算 / 已停止。
  *
- * 「待结算」优先于「已停止」——完结必然伴随停用，若先判 running
- * 就永远看不到待结算。三处渲染（列表圆点、列表标签、详情统计卡）
- * 共用这一个判定，避免各写一遍后逐渐不一致。
+ * 「已结算」优先于「监控中」：settledOutcome 有值意味着代币已归 1 或 0，
+ * 盘口不会再动，这时候还显示「监控中」是自相矛盾的——重启后一屏已结束的盘口
+ * 就是这个矛盾的表现。其次是「待结算」（已完结、等链上出结果），
+ * 它又优先于「已停止」，否则完结必然伴随停用、永远看不到待结算。
+ *
+ * 三处渲染（列表圆点、列表标签、详情统计卡）共用这一个判定，避免各写一遍后逐渐不一致。
  */
-type RuleRunState = { key: 'running' | 'settled' | 'stopped'; label: string; dotClass: string; textClass: string }
+type RuleRunState = { key: 'running' | 'resolved' | 'settled' | 'stopped'; label: string; dotClass: string; textClass: string }
 
 function runStateOf(rule: PriceMonitorRule, monitor?: PriceMonitorState | null): RuleRunState {
+  if (rule.settledOutcome) {
+    const won = rule.settledOutcome === 'yes'
+    return {
+      key: 'resolved',
+      label: won ? '已结算·赢' : '已结算·输',
+      dotClass: won ? 'bg-blue-500' : 'bg-gray-400',
+      textClass: won ? 'text-blue-600' : 'text-muted-foreground',
+    }
+  }
   if (monitor?.running) {
     return { key: 'running', label: '监控中', dotClass: 'bg-green-500 animate-pulse', textClass: 'text-green-600' }
   }
@@ -299,16 +312,16 @@ export default function PriceBotPage() {
 
   // 左侧列表按比赛状态过滤（matchStatus 由后端 listRules 现算带出）
   //
-  // 手动完结（settledAt 有值）的规则已经停止监控，只是在等链上结算，
-  // 不该再混在「进行中」里——那一栏是用来看「还在盯的盘口」的。
-  // 所以待结算单独成一栏，并从其余三栏排除。
+  // 「已结算」（链上真相已回填）和「待结算」（已完结、等链上出结果）各自成栏，
+  // 并从「进行中 / 即将开始 / 已结束」排除——那三栏是用来看还在盯的盘口的。
   const statusCounts = useMemo(() => {
-    const settled = rules.filter((r) => r.settledAt).length
-    const active = rules.filter((r) => !r.settledAt)
+    const resolved = rules.filter((r) => r.settledOutcome).length
+    const settled = rules.filter((r) => !r.settledOutcome && r.settledAt).length
+    const active = rules.filter((r) => !r.settledOutcome && !r.settledAt)
     const live = active.filter((r) => r.matchStatus === 'live').length
     const not_started = active.filter((r) => r.matchStatus === 'not_started').length
     const ended = active.filter((r) => r.matchStatus === 'ended').length
-    return { all: rules.length, live, not_started, ended, settled }
+    return { all: rules.length, live, not_started, ended, settled, resolved }
   }, [rules])
 
   const filteredRules = useMemo(() => {
@@ -316,9 +329,10 @@ export default function PriceBotPage() {
     return rules.filter((r) => {
       if (!mf.match(r)) return false
       if (statusFilter === 'all') return true
-      if (statusFilter === 'settled') return !!r.settledAt
-      // 其余三栏只看未完结的规则
-      return !r.settledAt && r.matchStatus === statusFilter
+      if (statusFilter === 'resolved') return !!r.settledOutcome
+      if (statusFilter === 'settled') return !r.settledOutcome && !!r.settledAt
+      // 其余三栏只看未完结、未结算的规则
+      return !r.settledOutcome && !r.settledAt && r.matchStatus === statusFilter
     })
   }, [rules, statusFilter, marketFilter])
 
@@ -924,6 +938,20 @@ function BotCard({
             自动
           </span>
         )}
+        {runState.key === 'resolved' && (
+          <span
+            className={cn(
+              'inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-xs font-medium',
+              rule.settledOutcome === 'yes'
+                ? 'border-blue-500/40 bg-blue-500/10 text-blue-600'
+                : 'border-gray-400/40 bg-muted text-muted-foreground',
+            )}
+            title={`链上已结算：${rule.settledOutcome === 'yes' ? '赢' : '输'}`}
+          >
+            <CheckCircle2 className="h-3 w-3" />
+            {runState.label}
+          </span>
+        )}
         {runState.key === 'settled' && (
           <span
             className="inline-flex items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-600"
@@ -1285,16 +1313,21 @@ function StatusSection({ rule, monitor }: { rule: PriceMonitorRule; monitor: Pri
   if (!monitor) {
     return (
       <div className="p-6 text-center text-sm text-muted-foreground">
-        {runState.key === 'settled'
-          ? `该机器人已完结，等待链上结算${rule.settledAt ? `（${formatBeijingTime(rule.settledAt)}）` : ''}`
-          : '该机器人尚未启动监控'}
+        {runState.key === 'resolved'
+          ? `该机器人已链上结算（${rule.settledOutcome === 'yes' ? '赢' : '输'}）`
+          : runState.key === 'settled'
+            ? `该机器人已完结，等待链上结算${rule.settledAt ? `（${formatBeijingTime(rule.settledAt)}）` : ''}`
+            : '该机器人尚未启动监控'}
       </div>
     )
   }
   return (
     <div className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-3">
       <KV label="运行状态" value={runState.label} className={runState.textClass} />
-      {runState.key === 'settled' && rule.settledAt && (
+      {runState.key === 'resolved' && (
+        <KV label="链上结果" value={rule.settledOutcome === 'yes' ? '赢' : '输'} />
+      )}
+      {(runState.key === 'settled' || runState.key === 'resolved') && rule.settledAt && (
         <KV label="完结时间" value={formatBeijingTime(rule.settledAt)} />
       )}
       <KV label="当前价" value={fmtPrice(monitor.lastPrice)} className="font-mono" />

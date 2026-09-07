@@ -87,7 +87,7 @@ import {
   matchMinuteFrom,
 } from '../bots/price-bot/goal-lines.js';
 import { decideNextLineOpening, buyGateReason } from '../bots/price-bot/next-line.js';
-import { saveLineSnapshots, getLineSnapshots, recordLog } from '../bots/price-bot/db.js';
+import { saveLineSnapshots, getLineSnapshots, recordLog, disableFinishedRules } from '../bots/price-bot/db.js';
 import type { LineSnapshot } from '../bots/price-bot/db.js';
 import { fetchRealOrderReport, listRealOrderReportLeagues } from '../bots/price-bot/report.js';
 import { config } from '../config.js';
@@ -1628,6 +1628,7 @@ app.get('/api/bots/price-bot/orders', asyncHandler(async (req, res) => {
 app.post('/api/bots/price-bot/rules/sync-outcomes', asyncHandler(async (req, res) => {
   const limit = req.body?.limit !== undefined ? Number(req.body.limit) : 200;
   const result = await syncRuleOutcomes(Number.isFinite(limit) ? limit : 200);
+  stopSettledMonitors(result.disabledRuleIds);
   res.json({ success: true, ...result });
 }));
 
@@ -1797,6 +1798,24 @@ app.post('/api/bots/price-bot/rules/batch-quick', asyncHandler(async (_req, res)
  * 下一档继承当前规则的 goalSurgeParams 和 autoTradeParams，但**不继承授权开关**：
  * autoTradeEnabled 一律为 false。递进可以自动，动钱不能自动——新盘口要你再点一次授权。
  */
+/**
+ * 把已被链上结算回填停用的规则从内存监控里摘掉。
+ *
+ * `recordRuleOutcome` 只能改库，改不到 price-bot 进程内的 state.monitors——
+ * 不摘的话库里 enabled=0、界面上却仍显示「监控中」，就是这次要修的那个矛盾状态。
+ * 顺手撤未成交买单：规则已结算，代币归 1 或 0，挂着的买单成交是纯裸风险
+ * （与「规则停用」路径同口径）。
+ *
+ * 同步函数、不 await：stopMonitor 本身是同步的，撤单是 fire-and-forget，
+ * 不能让补数据这条离线路径被网络往返拖住。
+ */
+function stopSettledMonitors(ruleIds: number[]): void {
+  for (const id of ruleIds) {
+    stopMonitor(id);
+    void cancelRestingBuyOrders(id, '链上已结算');
+  }
+}
+
 /** 完结结果。抽出类型是为了让 HTTP 路由和自动完结走同一套返回结构。 */
 interface SettleOutcome {
   ok: boolean;
@@ -2097,8 +2116,11 @@ app.post('/api/bots/price-bot/monitors/batch-start', asyncHandler(async (req, re
   if (Array.isArray(rawIds)) {
     ruleIds = rawIds.map(Number).filter((n) => Number.isFinite(n));
   } else {
-    // 未指定则启动全部已启用规则
-    const { rules } = await listRules({ enabledOnly: true });
+    // 未指定则启动全部已启用**且未结束**的规则。
+    // excludeFinished 少不得：规则只增不减，已结算的盘也还挂着 enabled=1 的历史包袱，
+    // 不滤掉的话「全部启动」会把整部历史拉回监控。limit 显式放开，
+    // 否则默认 100 会静默截掉真该启动的那些。
+    const { rules } = await listRules({ enabledOnly: true, excludeFinished: true, limit: 1000 });
     ruleIds = rules.map((r) => r.id).filter((id): id is number => id !== undefined);
   }
 
@@ -2227,8 +2249,10 @@ app.post('/api/bots/price-bot/report/refresh', asyncHandler(async (_req, res) =>
     }));
     const outcomes = await syncRuleOutcomes(200).catch((err: unknown) => ({
       pending: 0, resolved: 0, stillOpen: 0, notFound: 0, failed: 1,
+      disabledRuleIds: [] as number[],
       details: [{ ruleId: 0, status: err instanceof Error ? err.message : String(err) }],
     }));
+    stopSettledMonitors(outcomes.disabledRuleIds);
     const report = await fetchRealOrderReport(pool);
     res.json({
       success: true,
@@ -2348,8 +2372,9 @@ const server = app.listen(PORT, async () => {
   async function runOutcomeSync() {
     try {
       const result = await syncRuleOutcomes(200);
+      stopSettledMonitors(result.disabledRuleIds);
       if (result.resolved > 0 || result.failed > 0) {
-        console.log(`[OutcomeSync] pending=${result.pending} resolved=${result.resolved} open=${result.stillOpen} failed=${result.failed}`);
+        console.log(`[OutcomeSync] pending=${result.pending} resolved=${result.resolved} open=${result.stillOpen} failed=${result.failed} 停用=${result.disabledRuleIds.length}`);
       }
     } catch (err) {
       console.error('[OutcomeSync] 规则结算回填失败:', err);
@@ -2376,6 +2401,14 @@ const server = app.listen(PORT, async () => {
  */
 async function restorePriceBot(): Promise<void> {
   try {
+    // 先清历史积压再启动。链上回填从前只写 settled_outcome 不关 enabled，
+    // 而唯一会关它的自动完结要求买价站上 0.99 持稳 30 秒——Over 输了永远等不到。
+    // 于是已结束的规则一直是 enabled=1，每次重启都被拉回监控，界面上一屏「监控中」。
+    // 幂等，跑第二次是 0 条。
+    const disabled = await disableFinishedRules();
+    if (disabled.length) {
+      console.log(`[PriceBot] 启动清理：停用 ${disabled.length} 条已结束的规则（已链上结算或开哨已过 3 小时）`);
+    }
     await startPriceBot();
     const status = getPriceBotStatus();
     console.log(`[PriceBot] 启动自恢复完成，监控中 ${status.monitors?.length ?? 0} 条规则`);

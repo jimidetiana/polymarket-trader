@@ -40,6 +40,7 @@ import {
   getAutoOrderSummary,
   getLineSnapshots,
   listRestingBuyOrders,
+  isRuleFinished,
 } from './db.js';
 import { placeOrder, cancelOrder } from '../../soccer/trading.js';
 import {
@@ -1870,6 +1871,13 @@ async function prepareMonitor(ruleId: number): Promise<boolean> {
   if (!rule.enabled) {
     throw new Error(`规则 #${ruleId} 已禁用，请先启用`)
   }
+  // enabled=1 不等于「该跑」。已结算或开哨已过 3 小时的盘拉起来只会占 WS 订阅额度、
+  // 往日志灌下架后的 0.000 价，而且在界面上显示成「监控中」——这正是重启后
+  // 一屏已结束盘口的来源。放在这里而不是各调用点，因为三条启动路径
+  // （startBot / batch-start / 单条 start）都必经此处。
+  if (await isRuleFinished(ruleId)) {
+    throw new Error(`规则 #${ruleId} 所属比赛已结束或已链上结算，不再监控`)
+  }
 
   let monitor = state.monitors.get(ruleId)
   if (!monitor) {
@@ -2022,7 +2030,10 @@ export async function startBot(config?: Partial<PriceBotConfig>): Promise<void> 
   state.config.enabled = true
   wsCloseRequested = false
 
-  const { rules } = await listRules({ enabledOnly: true })
+  // excludeFinished：这里不走 prepareMonitor（它每条都要查一次库），所以闸门要自己带。
+  // 少了它，重启自恢复会把所有历史规则一次性拉回监控——实测积压 166 条已结束的盘。
+  // limit 默认只有 100，必须显式放开，否则被截掉的规则不启动，且没有任何提示。
+  const { rules } = await listRules({ enabledOnly: true, excludeFinished: true, limit: 1000 })
   for (const rule of rules) {
     if (rule.id !== undefined) {
       ruleCache.set(rule.id, rule)

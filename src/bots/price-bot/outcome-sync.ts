@@ -47,6 +47,15 @@ export interface OutcomeSyncResult {
   pending: number
   /** 成功写入结算真相的规则数 */
   resolved: number
+  /**
+   * 本轮因回填到链上真相而被停用的规则 id。
+   *
+   * 交给调用方去 stopMonitor：recordRuleOutcome 只能改库，改不到内存里的
+   * state.monitors。不停的话库里 enabled=0、界面却还显示「监控中」。
+   * 由 server.ts 停而不在这里直接 import price-bot.js，是为了不让
+   * 「补数据」这条离线路径反向依赖运行时模块。
+   */
+  disabledRuleIds: number[]
   /** 盘口查到了但还没结算（价格仍在中间）的规则数 */
   stillOpen: number
   /** gamma 里找不到对应盘口的规则数 */
@@ -73,6 +82,7 @@ export async function syncRuleOutcomes(limit = 200): Promise<OutcomeSyncResult> 
     stillOpen: 0,
     notFound: 0,
     failed: 0,
+    disabledRuleIds: [],
     details: [],
   }
 
@@ -113,6 +123,9 @@ export async function syncRuleOutcomes(limit = 200): Promise<OutcomeSyncResult> 
       continue
     }
     result.resolved++
+    // recordRuleOutcome 写真相的同时把规则停用了（链上已结算＝盘口不会再动）。
+    // 记下 id 让调用方停掉内存里的 monitor。
+    result.disabledRuleIds.push(r.id)
     result.details.push({ ruleId: r.id, status: '已回填', price, outcome })
   }
 
