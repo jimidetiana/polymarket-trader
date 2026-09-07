@@ -172,6 +172,47 @@ async function doEnsureTables(): Promise<void> {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
 
+  // 全场次盘口监控表（纯观测，不下单）。
+  //
+  // 为什么不复用 price_bot_line_snapshots：那张是 INSERT IGNORE + uk_event_line，
+  // 一场一档只留一行、首写即定稿——那是「赛前定盘价」的形状。这里要的是
+  // **时间序列**，同一 token 一场比赛内有几十上百行，所以唯一键换成
+  // (token_id, snapshot_at)。
+  //
+  // 为什么两侧各存一行而不是拿 1-Over 推 Under：二元无套利只保证理论上
+  // Under_ask = 1 - Over_bid，但平台上两个 token 各有独立盘口，薄盘时两边
+  // 会同时虚高。要测「真实可成交价」就得存各自的真实盘口，推导值留给事后对照。
+  //
+  // 为什么存前 5 档而不只存 best：买入吃的是深度加权价，不是顶档。
+  // Dubach(2026) 实测 Polymarket 深度分布接近均匀几何网格而非集中在顶档，
+  // 顶档 ask 会系统性低估成交成本。
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS price_bot_line_monitor (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      event_id VARCHAR(100) NOT NULL,
+      market_id VARCHAR(100) NOT NULL,
+      line DECIMAL(6,2) NOT NULL COMMENT '总进球线',
+      token_id VARCHAR(200) NOT NULL,
+      side VARCHAR(10) NOT NULL COMMENT 'over/under',
+      snapshot_at DATETIME NOT NULL COMMENT 'UTC，采样时刻',
+      kickoff_at DATETIME DEFAULT NULL COMMENT 'UTC 计划开哨（soccer_events.end_time）',
+      match_minute INT DEFAULT NULL COMMENT '负数=赛前',
+      match_status VARCHAR(20) DEFAULT NULL,
+      home_score INT DEFAULT NULL,
+      away_score INT DEFAULT NULL,
+      best_bid DECIMAL(8,4) DEFAULT NULL,
+      best_ask DECIMAL(8,4) DEFAULT NULL,
+      bid_depth JSON DEFAULT NULL COMMENT '买方前5档 [[price,size],...] 由高到低',
+      ask_depth JSON DEFAULT NULL COMMENT '卖方前5档 [[price,size],...] 由低到高',
+      book_valid TINYINT NOT NULL DEFAULT 0 COMMENT '决策时刻双边可成交',
+      invalid_reason VARCHAR(40) DEFAULT NULL,
+      UNIQUE KEY uk_token_snap (token_id, snapshot_at),
+      KEY idx_event_line (event_id, line),
+      KEY idx_snap (snapshot_at),
+      KEY idx_valid (book_valid, snapshot_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `)
+
   // 连接事件表：记录 WS 断开/重连，用于验证断联与进球的相关性
   await pool.execute(`
     CREATE TABLE IF NOT EXISTS price_bot_connection_events (
@@ -1371,6 +1412,78 @@ export async function getLineSnapshots(eventId: string): Promise<Map<number, Lin
     })
   }
   return map
+}
+
+/** 一条全场次监控采样（纯观测） */
+export interface LineMonitorRow {
+  eventId: string
+  marketId: string
+  line: number
+  tokenId: string
+  side: 'over' | 'under'
+  /** UTC ISO 串，由调用方给定——不能用 DB 的 CURRENT_TIMESTAMP（那是本机 UTC+8） */
+  snapshotAt: string
+  kickoffAt: string | null
+  matchMinute: number | null
+  matchStatus: string | null
+  homeScore: number | null
+  awayScore: number | null
+  bestBid: number | null
+  bestAsk: number | null
+  bidDepth: [number, number][]
+  askDepth: [number, number][]
+  bookValid: boolean
+  invalidReason: string | null
+}
+
+/**
+ * 批量写监控采样。
+ *
+ * 用 INSERT IGNORE + uk(token_id, snapshot_at)：同一轮重跑不会写重，
+ * 但不同时刻的同一 token 会各留一行——这正是时间序列要的语义。
+ *
+ * snapshot_at 由调用方传 UTC 串而不是用 UTC_TIMESTAMP()：一轮里几百条
+ * 必须共享**同一个**采样时刻，否则事后没法把同一轮的两侧盘口配成一对。
+ */
+export async function saveLineMonitorRows(rows: LineMonitorRow[]): Promise<number> {
+  if (rows.length === 0) return 0
+  await ensureTables()
+  let inserted = 0
+  // 分批，避免单条 SQL 过长
+  const CHUNK = 200
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK)
+    const ph = chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',')
+    const args: any[] = []
+    for (const r of chunk) {
+      args.push(
+        r.eventId, r.marketId, r.line, r.tokenId, r.side, r.snapshotAt,
+        r.kickoffAt, r.matchMinute, r.matchStatus, r.homeScore, r.awayScore,
+        r.bestBid, r.bestAsk,
+        JSON.stringify(r.bidDepth), JSON.stringify(r.askDepth),
+        r.bookValid ? 1 : 0,
+      )
+    }
+    const [res] = await pool.execute<any>(
+      `INSERT IGNORE INTO price_bot_line_monitor
+         (event_id, market_id, line, token_id, side, snapshot_at,
+          kickoff_at, match_minute, match_status, home_score, away_score,
+          best_bid, best_ask, bid_depth, ask_depth, book_valid)
+       VALUES ${ph}`,
+      args,
+    )
+    inserted += Number(res?.affectedRows ?? 0)
+  }
+  // invalid_reason 单独更新，避免上面占位符再长一截
+  const bad = rows.filter((r) => r.invalidReason)
+  for (const r of bad) {
+    await pool.execute(
+      `UPDATE price_bot_line_monitor SET invalid_reason = ?
+        WHERE token_id = ? AND snapshot_at = ?`,
+      [r.invalidReason, r.tokenId, r.snapshotAt],
+    )
+  }
+  return inserted
 }
 
 function rowToConnectionEvent(row: any): PriceBotConnectionEvent {
