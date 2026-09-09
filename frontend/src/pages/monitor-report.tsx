@@ -5,9 +5,14 @@ import { Layout } from '@/components/layout'
 import { cn, formatNumber, formatPercent } from '@/lib/utils'
 import {
   fetchMonitorReport,
+  fetchMonitorEv,
   type MonitorReport,
   type ReversalParams,
+  type EvReport,
 } from '@/lib/api'
+
+/** 实时刷新间隔。20s 对齐采集器场中 tick，再快也不会有新数据 */
+const REFRESH_MS = 20_000
 
 /** 采集器落后多少秒算「停了」。tick 最长 300s（赛前远端），留一倍余量 */
 const STALE_LIMIT_SEC = 600
@@ -68,7 +73,9 @@ export default function MonitorReportPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [report, setReport] = useState<MonitorReport | null>(null)
+  const [ev, setEv] = useState<EvReport | null>(null)
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
+  const [autoRefresh, setAutoRefresh] = useState(true)
 
   // 反转口径。默认对齐手写 SQL：早端含赛前、不限双边可成交
   const [rev, setRev] = useState<ReversalParams>({
@@ -80,17 +87,19 @@ export default function MonitorReportPage() {
     validOnly: false,
   })
 
-  const load = useCallback(async (params: ReversalParams) => {
-    setLoading(true)
+  /** silent=true 用于自动刷新：不亮 loading，避免每 20 秒闪一次 */
+  const load = useCallback(async (params: ReversalParams, silent = false) => {
+    if (!silent) setLoading(true)
     setError(null)
     try {
-      const data = await fetchMonitorReport(params)
+      const [data, evData] = await Promise.all([fetchMonitorReport(params), fetchMonitorEv()])
       setReport(data)
+      setEv(evData)
       setLastUpdated(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败')
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [])
 
@@ -99,6 +108,15 @@ export default function MonitorReportPage() {
     // 只在首次挂载拉一次；改口径要点「应用」，避免每敲一个字符打一次库
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 实时更新：静默轮询。rev 用 ref 语义读最新值，避免把定时器重建成依赖地狱
+  useEffect(() => {
+    if (!autoRefresh) return
+    const timer = setInterval(() => {
+      void load(rev, true)
+    }, REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [autoRefresh, load, rev])
 
   const ov = report?.overview
   const stale = ov?.staleSeconds
@@ -126,14 +144,27 @@ export default function MonitorReportPage() {
               </p>
             </div>
           </div>
-          <button
-            onClick={() => void load(rev)}
-            disabled={loading}
-            className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
-          >
-            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-            刷新
-          </button>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+              <span className={cn(autoRefresh && 'text-success')}>
+                每 {REFRESH_MS / 1000}s 自动刷新
+              </span>
+            </label>
+            <button
+              onClick={() => void load(rev)}
+              disabled={loading}
+              className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+              刷新
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -194,6 +225,131 @@ export default function MonitorReportPage() {
               </ul>
             </div>
           </>
+        )}
+
+        {ev && (
+          <section className="overflow-hidden rounded-md border bg-card">
+            <div className="border-b px-3 py-2 text-sm font-medium">
+              买入方案与盈利可能
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                按真实卖价买入 · 每场只取一个观测 · 结算由终局价 ≥{ev.settlement.threshold} 反推
+              </span>
+            </div>
+
+            {!ev.anyAdequate && (
+              <div className="m-3 rounded-md border border-error/40 bg-error/10 p-3 text-xs leading-relaxed">
+                <div className="mb-1 font-medium text-error">
+                  当前没有任何价格带样本足够，下面的 EV 都不能当结论用
+                </div>
+                <div className="text-muted-foreground">
+                  已定局 {ev.settlement.overWon + ev.settlement.underWon} 场（Over{' '}
+                  {ev.settlement.overWon} / Under {ev.settlement.underWon}），未定局{' '}
+                  {ev.settlement.undecided} 场已排除。每格至少要 30 场才出数字，
+                  而 EV 区间全部跨零 —— 连方向都定不下来，不是「小赚」而是「未知」。
+                </div>
+              </div>
+            )}
+
+            <div className="grid gap-3 p-3 md:grid-cols-3">
+              {ev.breakdowns
+                .filter((b) => b.cells.length > 0)
+                .map((b) => (
+                  <div key={`${b.side}-${b.minuteFrom}`} className="rounded-md border">
+                    <div className="border-b bg-muted/30 px-2.5 py-1.5 text-xs font-medium">
+                      买 {b.side === 'over' ? 'Over' : 'Under'} · {b.minuteFrom}′~{b.minuteTo}′
+                      <span className="ml-1.5 font-normal text-muted-foreground">
+                        基线 {b.baseRate == null ? '—' : formatPercent(b.baseRate)}
+                      </span>
+                    </div>
+                    <table className="w-full text-left text-[11px]">
+                      <thead className="text-muted-foreground">
+                        <tr>
+                          <th className="px-2 py-1 font-medium">买价带</th>
+                          <th className="px-2 py-1 text-right font-medium">场次</th>
+                          <th className="px-2 py-1 text-right font-medium">胜率</th>
+                          <th className="px-2 py-1 text-right font-medium">每美元EV</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {b.cells.map((c) => (
+                          <tr key={c.band}>
+                            <td className="px-2 py-1 font-mono">{c.band}</td>
+                            <td className="px-2 py-1 text-right tabular-nums">
+                              {c.wins}/{c.events}
+                            </td>
+                            <td className="px-2 py-1 text-right tabular-nums">
+                              {c.winRate == null ? '—' : formatPercent(c.winRate)}
+                              {c.ciLow != null && (
+                                <div className="text-[10px] text-muted-foreground">
+                                  {formatPercent(c.ciLow)}~{formatPercent(c.ciHigh!)}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-2 py-1 text-right tabular-nums">
+                              {!c.adequate ? (
+                                <span className="text-warning" title={`还差 ${c.eventsNeeded} 场`}>
+                                  样本不足
+                                </span>
+                              ) : (
+                                <span
+                                  className={cn(
+                                    c.evPerDollar != null && c.evPerDollar > 0
+                                      ? 'text-success'
+                                      : 'text-error',
+                                  )}
+                                >
+                                  {c.evPerDollar == null ? '—' : formatPercent(c.evPerDollar)}
+                                </span>
+                              )}
+                              {c.evLow != null && (
+                                <div
+                                  className={cn(
+                                    'text-[10px]',
+                                    c.evLow < 0 && c.evHigh! > 0
+                                      ? 'text-warning'
+                                      : 'text-muted-foreground',
+                                  )}
+                                >
+                                  {formatPercent(c.evLow)}~{formatPercent(c.evHigh!)}
+                                  {c.evLow < 0 && c.evHigh! > 0 && ' 跨零'}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+            </div>
+
+            <div className="border-t bg-muted/20 p-3 text-xs leading-relaxed">
+              <div className="mb-1.5 font-medium">为什么这些数字比看起来更不可靠</div>
+              <div className="space-y-1.5 text-muted-foreground">
+                <div>
+                  <span className="text-foreground">选择偏差（结构性，修不掉）</span>：进球后赢家钉
+                  0.999、卖档空 → 该行判无效。于是「可成交」样本偏向<span className="text-foreground">还没进球</span>的场次。实测&nbsp;
+                  {ev.selectionBias.map((s) => `${s.outcome} 可成交率 ${formatPercent(s.validRate)}`).join('，')}
+                  ，差 {ev.selectionBias.length === 2
+                    ? formatPercent(Math.abs(ev.selectionBias[0].validRate - ev.selectionBias[1].validRate))
+                    : '—'}
+                  。只看可成交样本等于偏向 0-0，会高估 Under、低估 Over。
+                </div>
+                <div>
+                  <span className="text-foreground">自相关</span>：每 20 秒一行，同一场重复计入。
+                  {ev.autocorrelation.map((a) => `${a.band} ${a.rows}行/${a.events}场`).join('，')}
+                  。所以这里一律 per-event 聚合，行数不能当样本量。
+                </div>
+                <div>
+                  <span className="text-foreground">Over 0.5 天然高胜率</span>：基线已是{' '}
+                  {ev.breakdowns.find((b) => b.side === 'over')?.baseRate == null
+                    ? '—'
+                    : formatPercent(ev.breakdowns.find((b) => b.side === 'over')!.baseRate!)}
+                  ，「买 Over 赢得多」本身不是发现。有意义的只有胜率减隐含概率的差，且要过显著性。
+                </div>
+              </div>
+            </div>
+          </section>
         )}
 
         {report && (

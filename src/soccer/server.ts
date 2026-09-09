@@ -91,6 +91,7 @@ import { saveLineSnapshots, getLineSnapshots, recordLog, disableFinishedRules } 
 import type { LineSnapshot } from '../bots/price-bot/db.js';
 import { fetchRealOrderReport, listRealOrderReportLeagues } from '../bots/price-bot/report.js';
 import { fetchMonitorReport, parseReversalParams } from '../bots/price-bot/monitor-report.js';
+import { fetchEvReport } from '../bots/price-bot/monitor-ev.js';
 import { config } from '../config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2242,6 +2243,15 @@ app.get('/api/bots/price-bot/monitor-report', asyncHandler(async (req, res) => {
     reversal: parseReversalParams(req.query as Record<string, unknown>),
     gateThreshold,
   });
+  res.json({ success: true, report });
+}));
+
+/**
+ * 买入方案 EV。口径见 monitor-ev.ts 头注释：per-event 聚合、真实卖价、
+ * 终局价定结算、未定局排除。样本不足的格子不给数字。
+ */
+app.get('/api/bots/price-bot/monitor-ev', asyncHandler(async (_req, res) => {
+  const report = await fetchEvReport(pool);
   res.json({ success: true, report });
 }));
 

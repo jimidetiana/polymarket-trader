@@ -1643,6 +1643,49 @@ export interface MonitorReport {
   }
 }
 
+export interface EvCell {
+  band: string
+  events: number
+  wins: number
+  winRate: number | null
+  ciLow: number | null
+  ciHigh: number | null
+  avgAsk: number | null
+  evPerDollar: number | null
+  evLow: number | null
+  evHigh: number | null
+  adequate: boolean
+  eventsNeeded: number
+}
+
+export interface EvBreakdown {
+  side: 'over' | 'under'
+  minuteFrom: number
+  minuteTo: number
+  cells: EvCell[]
+  baseRate: number | null
+  baseEvents: number
+}
+
+export interface EvReport {
+  settlement: { overWon: number; underWon: number; undecided: number; threshold: number }
+  selectionBias: Array<{
+    outcome: string
+    rows: number
+    validRows: number
+    validRate: number
+    events: number
+  }>
+  autocorrelation: Array<{ band: string; rows: number; events: number; rowsPerEvent: number }>
+  breakdowns: EvBreakdown[]
+  anyAdequate: boolean
+}
+
+export async function fetchMonitorEv(): Promise<EvReport> {
+  const data = await request<{ report: EvReport }>('/api/bots/price-bot/monitor-ev')
+  return data.report
+}
+
 export async function fetchMonitorReport(
   params: Partial<ReversalParams> & { gateThreshold?: number } = {},
 ): Promise<MonitorReport> {
