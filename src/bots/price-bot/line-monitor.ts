@@ -27,6 +27,7 @@ import {
   judgeBook,
   cadenceSeconds,
   toMysqlUtc,
+  passesMatchGate,
   DEFAULT_MONITOR_CONFIG,
   type MonitorConfig,
 } from './line-monitor-book.js'
@@ -34,7 +35,38 @@ import {
 export { DEFAULT_MONITOR_CONFIG, type MonitorConfig }
 
 const CLOB_BASE = process.env.CLOB_API_URL || 'https://clob.polymarket.com'
-const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || ''
+
+/**
+ * 代理必须**请求时**解析，不能在模块加载时定死。
+ *
+ * 原来这里是 `const proxyUrl = process.env.HTTPS_PROXY || ''` 直接建 axios 实例。
+ * 独立进程（line-monitor-runner）里环境变量的注入顺序在本模块 import 之后，
+ * 于是 proxyUrl 恒为空串 → 直连 clob.polymarket.com → read ECONNRESET，
+ * 连续几轮后变成 timeout of 20000ms exceeded。实测就是这个症状：
+ * 「窗口8 采样8 回书0」——库侧查得到候选，网络侧一本书都没回来。
+ *
+ * 变量名的取值顺序必须与主进程一致（server.ts:102、price-bot.ts:83 都是
+ * `HTTPS_PROXY || HTTP_PROXY`）。这里原先漏了 HTTP_PROXY，于是代理若是
+ * 用那个名字传进来的，机器人连得上而采集器拿到空串——同一台机器上
+ * 一个能跑一个不能，就是这个不一致造成的。
+ */
+let cachedAgent: HttpsProxyAgent<string> | null = null
+let cachedProxyUrl: string | undefined
+
+function proxyAgent(): HttpsProxyAgent<string> | undefined {
+  const url =
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.https_proxy ||
+    process.env.http_proxy ||
+    process.env.ALL_PROXY ||
+    ''
+  if (url !== cachedProxyUrl) {
+    cachedProxyUrl = url
+    cachedAgent = url ? new HttpsProxyAgent(url) : null
+  }
+  return cachedAgent ?? undefined
+}
 
 /**
  * timeout 给到 20s（机器人主路径是 5s）。
@@ -43,7 +75,6 @@ const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || ''
 const restAxios = axios.create({
   baseURL: CLOB_BASE,
   timeout: 20000,
-  ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl) } : {}),
 })
 
 /** 与 price-bot.ts 一致：服务端对无效 token 静默丢弃，必须按 asset_id 对齐 */
@@ -82,10 +113,11 @@ function parseJsonOrCsv(v: unknown): string[] {
 export async function collectCandidates(
   cfg: MonitorConfig,
   now = new Date(),
-): Promise<Candidate[]> {
+): Promise<{ candidates: Candidate[]; gatedOut: Record<string, number> }> {
   const [rows] = await pool.query<any[]>(
     `SELECT m.id AS market_id, m.event_id, m.question_en, m.question_zh, m.line,
-            m.outcomes, m.clob_token_ids, e.end_time
+            m.outcomes, m.clob_token_ids, e.end_time,
+            e.volume AS event_volume, e.liquidity AS event_liquidity
        FROM soccer_markets m
        JOIN soccer_events e ON e.id = m.event_id
       WHERE m.line IS NOT NULL
@@ -99,9 +131,22 @@ export async function collectCandidates(
 
   const wantLines = new Set(cfg.lines)
   const out: Candidate[] = []
+  // 赛事级闸门按 event 计数（一场比赛只算一次），不按盘口行——
+  // 同一场比赛在库里有 9 行 0.5 档（全场/半场/单队），下面 extractTotalGoalLine
+  // 只留全场那一行，但闸门统计要的是「筛掉了几场」。
+  const gatedEvents = new Map<string, string>()
   for (const r of rows) {
     const line = extractTotalGoalLine(r)
     if (line == null || !wantLines.has(line)) continue
+
+    const gate = passesMatchGate(
+      { volume: r.event_volume, liquidity: r.event_liquidity },
+      cfg,
+    )
+    if (!gate.pass) {
+      gatedEvents.set(String(r.event_id), gate.reason!)
+      continue
+    }
 
     const outcomes = parseJsonOrCsv(r.outcomes)
     const tokens = parseJsonOrCsv(r.clob_token_ids)
@@ -120,15 +165,23 @@ export async function collectCandidates(
       })
     }
   }
-  return out
+  const gatedOut: Record<string, number> = {}
+  for (const reason of gatedEvents.values()) {
+    gatedOut[reason] = (gatedOut[reason] ?? 0) + 1
+  }
+  return { candidates: out, gatedOut }
 }
 
-/** 批量取 book，按 asset_id 对齐 */
+/** 批量取 book，按 asset_id 对齐。agent 每次请求现取，见 proxyAgent 注释。 */
 async function fetchBooksBatch(tokenIds: string[]): Promise<Map<string, any>> {
   const out = new Map<string, any>()
   for (let i = 0; i < tokenIds.length; i += BOOKS_BATCH_SIZE) {
     const chunk = tokenIds.slice(i, i + BOOKS_BATCH_SIZE)
-    const resp = await restAxios.post('/books', chunk.map((token_id) => ({ token_id })))
+    const resp = await restAxios.post(
+      '/books',
+      chunk.map((token_id) => ({ token_id })),
+      { httpsAgent: proxyAgent() },
+    )
     const arr = Array.isArray(resp.data) ? resp.data : []
     for (const book of arr) {
       if (book?.asset_id) out.set(String(book.asset_id), book)
@@ -152,7 +205,7 @@ function filterDue(cands: Candidate[], now: Date): Candidate[] {
 }
 
 export interface RoundResult {
-  /** 时间窗内的候选总数（含被节流跳过的） */
+  /** 时间窗内的候选总数（过了赛事闸门、含被节流跳过的） */
   inWindow: number
   /** 本轮实际采样的候选数 */
   candidates: number
@@ -160,6 +213,8 @@ export interface RoundResult {
   inserted: number
   valid: number
   invalidByReason: Record<string, number>
+  /** 被赛事级闸门筛掉的**场次**数，按原因分组 */
+  gatedOut: Record<string, number>
 }
 
 /**
@@ -172,7 +227,7 @@ export async function runMonitorRound(
   cfg: MonitorConfig = DEFAULT_MONITOR_CONFIG,
   now = new Date(),
 ): Promise<RoundResult> {
-  const all = await collectCandidates(cfg, now)
+  const { candidates: all, gatedOut } = await collectCandidates(cfg, now)
   const cands = filterDue(all, now)
   const res: RoundResult = {
     inWindow: all.length,
@@ -181,6 +236,7 @@ export async function runMonitorRound(
     inserted: 0,
     valid: 0,
     invalidByReason: {},
+    gatedOut,
   }
   if (!cands.length) return res
 

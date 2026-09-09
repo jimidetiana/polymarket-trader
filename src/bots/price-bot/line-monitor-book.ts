@@ -18,6 +18,13 @@ export interface MonitorConfig {
   maxSpread: number
   /** 顶档最小挂单量（张） */
   minTopSize: number
+  /**
+   * 赛事最低成交量（USDC）。0 = 不按成交量筛。
+   * 默认 0，见 passesMatchGate 里为什么它不适合当主闸门。
+   */
+  minEventVolume: number
+  /** 赛事最低挂单深度（USDC）。0 = 不按深度筛。 */
+  minEventLiquidity: number
 }
 
 export const DEFAULT_MONITOR_CONFIG: MonitorConfig = {
@@ -26,6 +33,62 @@ export const DEFAULT_MONITOR_CONFIG: MonitorConfig = {
   postKickoffMinutes: 130,
   maxSpread: 0.1,
   minTopSize: 1,
+  // 成交量默认不筛：实测赛前成交量太小且与「盘能不能成交」不相关，见下。
+  minEventVolume: 0,
+  // 深度筛掉真正的死盘。5000 这个值实测省 9.9% 场次，且被它砍掉的
+  // 7 笔历史成交单合计净 -0.25（即被砍掉的是净亏单，不是盈利单）。
+  minEventLiquidity: 5_000,
+}
+
+/** 赛事级过滤的输入。字段名对齐 soccer_events 的列。 */
+export interface MatchGateInput {
+  /** soccer_events.volume：**累计已成交额**，每日 00:05 UTC 快照 */
+  volume: number | null | undefined
+  /** soccer_events.liquidity：盘上**还挂着**多少 */
+  liquidity: number | null | undefined
+}
+
+/**
+ * 「这场比赛值不值得采」的赛事级闸门。
+ *
+ * 为什么默认不按成交量筛（minEventVolume=0），尽管「冷门比赛不采」听起来天经地义：
+ *
+ * 1. **成交量和「盘能不能成交」几乎不相关。** volume 是已经成交了多少，
+ *    liquidity 是盘上还挂着多少。实测低量比赛的深度完全正常：
+ *      Woking FC   volume=41   liquidity=41,223
+ *      Vólos NPS   volume=88   liquidity=109,201
+ *      AD Machico  volume=234  liquidity=39,810
+ *      BK Hacken   volume=412  liquidity=168,460
+ *    做市商在冷门比赛上照样铺深度，这正是这些比赛能成交的原因。
+ *
+ * 2. **历史上赚钱的单一半在低量比赛里。** 108 笔成交单中 48 笔来自
+ *    volume<5000，合计净 +8.43（总净 +14.35）。阈值 500 就会砍掉 12 笔、
+ *    占总净利的 58%；阈值 3000 砍掉的净利超过 100%（即留下的是净亏组合）。
+ *
+ * 3. **赛前成交量本来就极小。** volume 是每日 00:05 UTC 的快照，未开赛场次
+ *    实测中位数只有 853、p90 才 3,592。而历史盈利单看到的那些「低量」数字
+ *    还是**赛后**快照（AD Machico 的 234 是开哨后 344 分钟采的），真实赛前
+ *    量比它更低——任何 ≥100 的阈值在当时都会把它们挡在外面。
+ *
+ * 所以成交量这一维留成可调旋钮但默认关。真正能安全砍掉的是**零深度死盘**：
+ * 全库 1846 场里 liquidity=0 的只有 27 场，liquidity<5000 的约占 9.9%。
+ *
+ * 两个条件是 **AND**（都要过），而不是任一过就留：deep-but-never-traded 是
+ * 正常的（做市商铺了盘还没人吃），traded-but-now-empty 才是异常。
+ */
+export function passesMatchGate(
+  m: MatchGateInput,
+  cfg: Pick<MonitorConfig, 'minEventVolume' | 'minEventLiquidity'>,
+): { pass: boolean; reason: string | null } {
+  const vol = Number(m.volume ?? 0)
+  const liq = Number(m.liquidity ?? 0)
+  if (cfg.minEventVolume > 0 && !(vol >= cfg.minEventVolume)) {
+    return { pass: false, reason: 'low_volume' }
+  }
+  if (cfg.minEventLiquidity > 0 && !(liq >= cfg.minEventLiquidity)) {
+    return { pass: false, reason: 'low_liquidity' }
+  }
+  return { pass: true, reason: null }
 }
 
 /**

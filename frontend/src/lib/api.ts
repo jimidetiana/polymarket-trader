@@ -1547,3 +1547,120 @@ export async function fetchPriceBotLogs(params?: {
   return { logs: data.logs ?? [], total: data.total ?? 0 }
 }
 
+// ---- 采集器汇总分析（price_bot_line_monitor）----
+
+export interface MonitorOverview {
+  rows: number
+  events: number
+  tokens: number
+  snapshots: number
+  firstSnapshot: string | null
+  lastSnapshot: string | null
+  spanMinutes: number
+  staleSeconds: number | null
+  validRows: number
+  validPct: number
+}
+
+export interface MonitorPhaseBucket {
+  phase: string
+  rows: number
+  valid: number
+  validPct: number
+  events: number
+}
+
+export interface MonitorReasonBucket { reason: string; rows: number; pct: number }
+
+export interface MonitorBandBucket {
+  band: string
+  rows: number
+  minMinute: number | null
+  maxMinute: number | null
+}
+
+export interface MonitorPairShape { shape: string; pairs: number }
+
+export interface MonitorMatchRow {
+  eventId: string
+  title: string | null
+  liquidity: number | null
+  volume: number | null
+  rows: number
+  valid: number
+  minMinute: number | null
+  maxMinute: number | null
+  reasons: string | null
+}
+
+export interface ReversalParams {
+  earlyBid: number
+  earlyBefore: number
+  earlyFrom: number | null
+  lateBid: number
+  lateAfter: number
+  validOnly: boolean
+}
+
+export interface ReversalMatch {
+  eventId: string
+  title: string | null
+  liquidity: number | null
+  volume: number | null
+  earlyMinMinute: number | null
+  earlyMaxMinute: number | null
+  earlyRows: number
+  earlyMaxBid: number | null
+  lateMinMinute: number | null
+  lateMaxMinute: number | null
+  lateRows: number
+  lateMaxBid: number | null
+}
+
+export interface ReversalResult {
+  params: ReversalParams
+  earlyEvents: number
+  lateEvents: number
+  reversals: number
+  rate: number | null
+  matches: ReversalMatch[]
+}
+
+export interface MonitorReport {
+  overview: MonitorOverview
+  phases: MonitorPhaseBucket[]
+  reasons: MonitorReasonBucket[]
+  bands: MonitorBandBucket[]
+  shapes: MonitorPairShape[]
+  matches: MonitorMatchRow[]
+  reversal: ReversalResult
+  gate: {
+    events: number
+    belowGate: number
+    aboveGate: number
+    nullLiquidity: number
+    threshold: number
+  }
+}
+
+export async function fetchMonitorReport(
+  params: Partial<ReversalParams> & { gateThreshold?: number } = {},
+): Promise<MonitorReport> {
+  const qs = new URLSearchParams()
+  if (params.earlyBid !== undefined) qs.set('earlyBid', String(params.earlyBid))
+  if (params.earlyBefore !== undefined) qs.set('earlyBefore', String(params.earlyBefore))
+  // null 表示「不设下界」，要显式跳过而不是写成空串
+  if (params.earlyFrom !== undefined && params.earlyFrom !== null) {
+    qs.set('earlyFrom', String(params.earlyFrom))
+  }
+  if (params.lateBid !== undefined) qs.set('lateBid', String(params.lateBid))
+  if (params.lateAfter !== undefined) qs.set('lateAfter', String(params.lateAfter))
+  if (params.validOnly) qs.set('validOnly', '1')
+  if (params.gateThreshold !== undefined) qs.set('gateThreshold', String(params.gateThreshold))
+  const suffix = qs.toString()
+  const data = await request<{ report: MonitorReport }>(
+    `/api/bots/price-bot/monitor-report${suffix ? `?${suffix}` : ''}`,
+  )
+  return data.report
+}
+

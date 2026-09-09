@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   topLevels,
   judgeBook,
+  passesMatchGate,
   cadenceSeconds,
   depthWeightedPrice,
   toMysqlUtc,
@@ -101,4 +102,60 @@ test('toMysqlUtc 输出无时区后缀的 UTC 串（本机 UTC+8 也不能偏）
 
 test('默认配置只采 0.5 档', () => {
   assert.deepEqual(DEFAULT_MONITOR_CONFIG.lines, [0.5])
+})
+
+// ---- passesMatchGate ----
+
+const gate = { minEventVolume: 0, minEventLiquidity: 5000 }
+
+test('passesMatchGate 深度够就过，成交量为 0 也不拦', () => {
+  // 实测依据：一半历史盈利来自 volume<5000 的场次，所以成交量默认不当闸门
+  assert.deepEqual(passesMatchGate({ volume: 0, liquidity: 41223 }, gate), {
+    pass: true,
+    reason: null,
+  })
+})
+
+test('passesMatchGate 深度不足挡下，理由是 low_liquidity', () => {
+  assert.deepEqual(passesMatchGate({ volume: 999999, liquidity: 4999 }, gate), {
+    pass: false,
+    reason: 'low_liquidity',
+  })
+})
+
+test('passesMatchGate 阈值是含下界（>=），边界值放行', () => {
+  assert.equal(passesMatchGate({ volume: 0, liquidity: 5000 }, gate).pass, true)
+})
+
+test('passesMatchGate null/undefined 当 0 处理，不当成无穷大放行', () => {
+  assert.deepEqual(passesMatchGate({ volume: null, liquidity: null }, gate), {
+    pass: false,
+    reason: 'low_liquidity',
+  })
+  assert.equal(passesMatchGate({ volume: undefined, liquidity: undefined }, gate).pass, false)
+})
+
+test('passesMatchGate 阈值 0 = 关闸门，任何值都放行', () => {
+  const off = { minEventVolume: 0, minEventLiquidity: 0 }
+  assert.equal(passesMatchGate({ volume: 0, liquidity: 0 }, off).pass, true)
+  assert.equal(passesMatchGate({ volume: null, liquidity: null }, off).pass, true)
+})
+
+test('passesMatchGate 开成交量闸门后先报 low_volume', () => {
+  const both = { minEventVolume: 500, minEventLiquidity: 5000 }
+  assert.deepEqual(passesMatchGate({ volume: 499, liquidity: 999999 }, both), {
+    pass: false,
+    reason: 'low_volume',
+  })
+})
+
+test('passesMatchGate 两条件是 AND：任一不过都挡', () => {
+  const both = { minEventVolume: 500, minEventLiquidity: 5000 }
+  assert.equal(passesMatchGate({ volume: 600, liquidity: 4000 }, both).pass, false)
+  assert.equal(passesMatchGate({ volume: 600, liquidity: 6000 }, both).pass, true)
+})
+
+test('默认配置：成交量闸门关、深度闸门 5000', () => {
+  assert.equal(DEFAULT_MONITOR_CONFIG.minEventVolume, 0)
+  assert.equal(DEFAULT_MONITOR_CONFIG.minEventLiquidity, 5000)
 })

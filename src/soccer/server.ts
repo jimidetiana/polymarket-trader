@@ -90,6 +90,7 @@ import { decideNextLineOpening, buyGateReason } from '../bots/price-bot/next-lin
 import { saveLineSnapshots, getLineSnapshots, recordLog, disableFinishedRules } from '../bots/price-bot/db.js';
 import type { LineSnapshot } from '../bots/price-bot/db.js';
 import { fetchRealOrderReport, listRealOrderReportLeagues } from '../bots/price-bot/report.js';
+import { fetchMonitorReport, parseReversalParams } from '../bots/price-bot/monitor-report.js';
 import { config } from '../config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2221,6 +2222,27 @@ app.get('/api/bots/price-bot/report', asyncHandler(async (req, res) => {
 app.get('/api/bots/price-bot/report/leagues', asyncHandler(async (_req, res) => {
   const leagues = await listRealOrderReportLeagues(pool);
   res.json({ success: true, leagues });
+}));
+
+/**
+ * 采集器（price_bot_line_monitor）汇总分析。纯只读，不打外网。
+ *
+ * 反转口径通过 query 传：earlyBid/earlyBefore/earlyFrom/lateBid/lateAfter/validOnly。
+ * 非法值退回默认（见 parseReversalParams），不静默变 0。
+ */
+app.get('/api/bots/price-bot/monitor-report', asyncHandler(async (req, res) => {
+  const gateRaw = req.query.gateThreshold;
+  const gateThreshold =
+    gateRaw === undefined || gateRaw === '' ? undefined : Number(gateRaw);
+  if (gateThreshold !== undefined && !Number.isFinite(gateThreshold)) {
+    res.status(400).json({ success: false, error: '无效的深度阈值 gateThreshold' });
+    return;
+  }
+  const report = await fetchMonitorReport(pool, {
+    reversal: parseReversalParams(req.query as Record<string, unknown>),
+    gateThreshold,
+  });
+  res.json({ success: true, report });
 }));
 
 let reportRefreshBusy = false;

@@ -23,6 +23,7 @@ export function Layout({ title, subtitle, children, actions }: LayoutProps) {
     { to: '/value-bot', label: '价值机器人', icon: Bot },
     { to: '/price-bot', label: '价格监控', icon: LineChart },
     { to: '/price-bot-report', label: '实单分析', icon: BarChart3 },
+    { to: '/monitor-report', label: '采集器分析', icon: Activity },
     { to: '/translations', label: '翻译', icon: Languages },
     { to: '/wallet', label: '钱包', icon: Wallet },
   ]
