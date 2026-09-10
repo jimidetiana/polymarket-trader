@@ -1660,6 +1660,8 @@ export interface EvCell {
 
 export interface EvBreakdown {
   side: 'over' | 'under'
+  /** 这一格算的是哪个档。多档同采后必须带上，否则数字没有含义 */
+  line: number
   minuteFrom: number
   minuteTo: number
   cells: EvCell[]
@@ -1677,6 +1679,8 @@ export interface EvReport {
     events: number
   }>
   autocorrelation: Array<{ band: string; rows: number; events: number; rowsPerEvent: number }>
+  /** 本次报告实际算了哪些档（库里有数据的那些） */
+  lines: number[]
   breakdowns: EvBreakdown[]
   anyAdequate: boolean
 }

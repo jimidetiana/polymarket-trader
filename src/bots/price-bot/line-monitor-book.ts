@@ -8,8 +8,25 @@ import { FIRST_TOTAL_LINE } from './goal-lines.js'
 
 /** 盘口有效性阈值。只用决策时刻信息，不看结果。 */
 export interface MonitorConfig {
-  /** 采样哪些档位。默认只 0.5。 */
+  /**
+   * 采样哪些档位。**每档都从开哨前就采，不等低档打出**。
+   *
+   * 为什么不是「0.5 冲破后再顺势接 1.5」：那正是 line-monitor.ts 头注释里
+   * 说的、这个采集器存在的原因要避开的做法。等 0.5 打出才开 1.5，1.5 的
+   * 样本条件就变成「已经进了 ≥1 球」，选择偏差会被读成错价（实测过一次：
+   * Over [0.10,0.30) 显示「隐含 77.7% vs 实测 45.9%」，等于 Over 3.5/4.5
+   * 赢了 54%，足球里不可能）。所以档位集合必须**与结果无关地预先定义**。
+   */
   lines: number[]
+  /**
+   * 某档的 Over 已经钉死后的采样间隔（秒）。0 = 不降频。
+   *
+   * 实测 80,000 行里 50,302 行（62.9%）是 0.5 的 Over 钉到 0.99 之后才采的，
+   * 这批行里还可成交的只有 6 行（0.012%）——即 3/5 的采集量在记录一个
+   * 不会再动的 0.999。降频而不是彻底停采：进球被 VAR 取消虽罕见但会翻档，
+   * 完全停采就把那种翻转记成「一直是 0.999」。
+   */
+  settledCadenceSeconds: number
   /** 开哨前多少分钟开始采 */
   preKickoffMinutes: number
   /** 开哨后多少分钟停止采 */
@@ -28,7 +45,14 @@ export interface MonitorConfig {
 }
 
 export const DEFAULT_MONITOR_CONFIG: MonitorConfig = {
-  lines: [FIRST_TOTAL_LINE],
+  // 0.5/1.5/2.5 三档同采。实测依据（20 场已被 Over 打破 0.5 的比赛，
+  // 查 /prices-history fidelity=1）：1.5 档 19/20 场、2.5 档 20/20 场在场中
+  // 都有报价，且每一场场中价格都动过 ≥0.05，不是钉住的死盘。
+  // 不含 3.5/4.5：没实测过它们场中的活跃度，且请求量按档线性涨。
+  lines: [FIRST_TOTAL_LINE, 1.5, 2.5],
+  // 5 分钟。0.5 平均在第 36.9 分钟就定了，之后每场还要白采 503 行；
+  // 降到 300s 砍掉其中约 93%，同时保留 VAR 翻转的观测窗口。
+  settledCadenceSeconds: 300,
   preKickoffMinutes: 60,
   postKickoffMinutes: 130,
   maxSpread: 0.1,
@@ -143,6 +167,45 @@ export function cadenceSeconds(matchMinute: number | null): number {
   if (matchMinute < -10) return 300
   if (matchMinute < 0) return 60
   return 20
+}
+
+/** 「这一档已经打出了」的判定阈值。与 monitor-ev 的 SETTLE_THRESHOLD 同值。 */
+export const SETTLED_BID = 0.99
+
+/**
+ * 这一档的 Over 是否已经钉死（=该档已打出，价格不会再回来）。
+ *
+ * **只认 Over 钉死，不认 Under 钉死**，这个不对称是刻意的：
+ *
+ * - Over 钉 0.999 = 球已经进了。进球不可逆（VAR 取消是罕见例外，
+ *   所以下面是降频而非停采），这一档没有信息了。
+ * - Under 钉 0.999 = 此刻还是 0-0，但**第 89 分钟仍可能进球**。这正是
+ *   要测的「翻车」瞬间。若把它也当已定局而降频，就会漏掉整个反转事件。
+ *
+ * 判据只用 bid：钉死时卖档是空的，best_ask 为 null，不能拿来判。
+ */
+export function isLineSettled(
+  side: 'over' | 'under',
+  bestBid: number | null | undefined,
+): boolean {
+  if (side !== 'over') return false
+  return bestBid != null && bestBid >= SETTLED_BID
+}
+
+/**
+ * 计入「该档是否已打出」之后的实际采样间隔。
+ *
+ * 已打出的档取 max(正常节奏, settledCadenceSeconds)：绝不比正常节奏更快，
+ * 也不会因为配 0 而变成「已打出就狂采」。
+ */
+export function cadenceSecondsFor(
+  matchMinute: number | null,
+  settled: boolean,
+  settledCadence: number = DEFAULT_MONITOR_CONFIG.settledCadenceSeconds,
+): number {
+  const base = cadenceSeconds(matchMinute)
+  if (!settled || settledCadence <= 0) return base
+  return Math.max(base, settledCadence)
 }
 
 /**

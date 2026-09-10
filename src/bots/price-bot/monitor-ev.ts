@@ -35,6 +35,18 @@ const SETTLE_THRESHOLD = 0.99
  */
 export const MIN_EVENTS_FOR_EV = 30
 
+/** EV 面板默认算哪一档。历史数据只有这一档，保持默认视图不变。 */
+export const DEFAULT_EV_LINE = 0.5
+
+/**
+ * 面板要展示的档位。与 DEFAULT_MONITOR_CONFIG.lines 对齐。
+ *
+ * 注意：多档**不是**同一个问题的更多样本。0.5 问「会不会进球」，
+ * 1.5 问「会不会进第 2 个」——各自要独立攒够 MIN_EVENTS_FOR_EV 场。
+ * 加档增加的是问题数（广度），不是任一问题的样本量（深度）。
+ */
+export const EV_LINES = [0.5, 1.5, 2.5]
+
 export type EvCell = {
   /** 分组标签，如 '0.80-0.95' */
   band: string
@@ -61,6 +73,8 @@ export type EvCell = {
 
 export type EvBreakdown = {
   side: 'over' | 'under'
+  /** 这一格算的是哪个档。多档同采后必须带上，否则数字没有含义 */
+  line: number
   /** 入场时机：每场取第一个可成交行，限定在这个分钟窗口内 */
   minuteFrom: number
   minuteTo: number
@@ -85,6 +99,8 @@ export type EvReport = {
   selectionBias: SelectionBiasRow[]
   /** 自相关证据：行级 n vs 场级 n */
   autocorrelation: Array<{ band: string; rows: number; events: number; rowsPerEvent: number }>
+  /** 本次报告实际算了哪些档（库里有数据的那些） */
+  lines: number[]
   breakdowns: EvBreakdown[]
   /** 结论能不能用。任一格子样本够才为 true */
   anyAdequate: boolean
@@ -202,19 +218,24 @@ export async function fetchEvBreakdown(
   side: 'over' | 'under',
   minuteFrom: number,
   minuteTo: number,
+  line: number = DEFAULT_EV_LINE,
 ): Promise<EvBreakdown> {
   // 赢的条件随侧翻转：买 Over 要 over_won=1，买 Under 要 over_won=0
   const winExpr = side === 'over' ? 'o.over_won' : '(1 - o.over_won)'
   const [rows] = await pool.query<any[]>(`${OUTCOME_CTE},
     first_valid AS (
       SELECT s.event_id, s.best_ask, ${winExpr} won,
+             -- PARTITION 必须带 line。只按 event_id 分区的话，一场比赛在
+             -- 多档同采时会被压成 1 个观测（line 排序最前的那档），其余档
+             -- 的样本被静默丢掉。0.5 单档时这个 bug 不显形。
              ROW_NUMBER() OVER (
-               PARTITION BY s.event_id ORDER BY s.match_minute, s.snapshot_at
+               PARTITION BY s.event_id, s.line ORDER BY s.match_minute, s.snapshot_at
              ) rn
       FROM price_bot_line_monitor s
       JOIN outcome o ON o.event_id = s.event_id AND o.line = s.line
       WHERE s.book_valid = 1 AND s.side = ? AND o.over_won IS NOT NULL
         AND s.best_ask IS NOT NULL
+        AND s.line = ?
         AND s.match_minute BETWEEN ? AND ?
     )
     SELECT CASE WHEN best_ask < 0.30 THEN '<0.30'
@@ -225,11 +246,13 @@ export async function fetchEvBreakdown(
            COUNT(*) events, SUM(won) wins, AVG(best_ask) avg_ask
     FROM first_valid WHERE rn = 1
     GROUP BY band ORDER BY band`,
-    [side, minuteFrom, minuteTo])
+    [side, line, minuteFrom, minuteTo])
 
+  // 基线也必须按档筛：outcome 是 per (event, line)，不筛档的话 0.5 的
+  // 94.6% 会和 2.5 的胜率混成一个没有含义的平均数。
   const [base] = await pool.query<any[]>(`${OUTCOME_CTE}
     SELECT COUNT(*) events, SUM(${side === 'over' ? 'over_won' : '1 - over_won'}) wins
-    FROM outcome WHERE over_won IS NOT NULL`)
+    FROM outcome WHERE over_won IS NOT NULL AND line = ?`, [line])
   const b = base[0] ?? {}
   const baseEvents = num(b.events)
 
@@ -259,6 +282,7 @@ export async function fetchEvBreakdown(
 
   return {
     side,
+    line,
     minuteFrom,
     minuteTo,
     cells,
@@ -274,21 +298,42 @@ export const MINUTE_WINDOWS: Array<{ label: string; from: number; to: number }> 
   { label: '下半场 46-90', from: 46, to: 90 },
 ]
 
+/**
+ * 库里真正有数据的档位，与 EV_LINES 求交集。
+ *
+ * 为什么先查一次而不是直接按 EV_LINES 全算：每个 (档,侧,窗口) 是 2 条查询，
+ * 3 档 × 2 侧 × 3 窗口 = 36 条。刚开采时 1.5/2.5 一行数据都没有，
+ * 那 24 条查询全是空转，而面板每 20 秒刷一次。
+ */
+export async function fetchLinesWithData(pool: Pool): Promise<number[]> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT DISTINCT line FROM price_bot_line_monitor ORDER BY line`,
+  )
+  const present = new Set(rows.map((r) => Number(r.line)))
+  const out = EV_LINES.filter((l) => present.has(l))
+  // 一行数据都没有时也要给默认档，否则面板拿不到任何结构
+  return out.length ? out : [DEFAULT_EV_LINE]
+}
+
 export async function fetchEvReport(pool: Pool): Promise<EvReport> {
+  const lines = await fetchLinesWithData(pool)
   const [settlement, selectionBias, autocorrelation, ...breakdowns] = await Promise.all([
     fetchSettlement(pool),
     fetchSelectionBias(pool),
     fetchAutocorrelation(pool),
-    ...MINUTE_WINDOWS.flatMap((w) => [
-      fetchEvBreakdown(pool, 'over', w.from, w.to),
-      fetchEvBreakdown(pool, 'under', w.from, w.to),
-    ]),
+    ...lines.flatMap((line) =>
+      MINUTE_WINDOWS.flatMap((w) => [
+        fetchEvBreakdown(pool, 'over', w.from, w.to, line),
+        fetchEvBreakdown(pool, 'under', w.from, w.to, line),
+      ]),
+    ),
   ])
   const bds = breakdowns as EvBreakdown[]
   return {
     settlement,
     selectionBias,
     autocorrelation,
+    lines,
     breakdowns: bds,
     anyAdequate: bds.some((b) => b.cells.some((c) => c.adequate)),
   }

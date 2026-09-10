@@ -1,6 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { wilson, eventsForMargin, MIN_EVENTS_FOR_EV } from './monitor-ev.js'
+import {
+  wilson,
+  eventsForMargin,
+  MIN_EVENTS_FOR_EV,
+  EV_LINES,
+  DEFAULT_EV_LINE,
+} from './monitor-ev.js'
+import { DEFAULT_MONITOR_CONFIG } from './line-monitor-book.js'
 
 // monitor-ev.ts 只 import type { Pool }，是类型导入，不会在加载时建连接池，
 // 所以这两个纯函数可以直接单测（同 line-monitor-book 的做法）。
@@ -59,4 +66,15 @@ test('eventsForMargin 最坏情况 p=0.5 约需千级样本', () => {
 
 test('样本门槛不低于 30，避免小样本出假精度', () => {
   assert.ok(MIN_EVENTS_FOR_EV >= 30)
+})
+
+test('EV 默认档是 0.5，历史数据的默认视图不会被新档冲掉', () => {
+  assert.equal(DEFAULT_EV_LINE, 0.5)
+})
+
+test('EV 面板的档位集合与采集器默认档对齐（加档不加样本，各自独立攒）', () => {
+  // 多档不是同一问题的更多样本：0.5 问「会不会进球」，1.5 问「会不会进第 2 个」
+  assert.deepEqual(EV_LINES, DEFAULT_MONITOR_CONFIG.lines)
+  // 至少包含默认档，否则面板会空白
+  assert.ok(EV_LINES.includes(DEFAULT_EV_LINE))
 })

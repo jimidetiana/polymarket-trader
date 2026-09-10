@@ -4,7 +4,9 @@
  *   npx tsx src/bots/price-bot/line-monitor-runner.ts
  *
  * 可选环境变量：
- *   MONITOR_LINES=0.5,1.5     采哪些档（默认只 0.5）
+ *   MONITOR_LINES=0.5,1.5,2.5 采哪些档（默认 0.5,1.5,2.5，全部从开哨前就采）
+ *   MONITOR_SETTLED_CADENCE=300  某档 Over 钉死后的采样间隔秒，0=不降频
+ *                                （默认 300：实测 62.9% 的采集量花在已钉死的档上）
  *   MONITOR_TICK_SECONDS=10   主循环间隔（默认 10；真实采样节奏由
  *                             cadenceSeconds 按每场比赛阶段决定）
  *   MONITOR_ONCE=1            只跑一轮就退出（用于验证）
@@ -88,6 +90,10 @@ const cfg: MonitorConfig = {
     process.env.MONITOR_MIN_VOLUME,
     DEFAULT_MONITOR_CONFIG.minEventVolume,
   ),
+  settledCadenceSeconds: parseThreshold(
+    process.env.MONITOR_SETTLED_CADENCE,
+    DEFAULT_MONITOR_CONFIG.settledCadenceSeconds,
+  ),
 }
 
 const tickMs = Math.max(1, Number(process.env.MONITOR_TICK_SECONDS ?? 10)) * 1000
@@ -113,6 +119,8 @@ async function tick(): Promise<void> {
       console.log(
         `[LineMonitor] 窗口${r.inWindow} 采样${r.candidates} 回书${r.booksReturned} ` +
           `落库${r.inserted} 有效${r.valid}` +
+          (r.settledActive ? ` 已钉${r.settledActive}档(降频)` : '') +
+          (r.newlySettled ? ` 新钉${r.newlySettled}` : '') +
           (bad ? ` | 无效: ${bad}` : '') +
           ` | ${Date.now() - t0}ms`,
       )
@@ -126,9 +134,10 @@ async function tick(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log(
-    `[LineMonitor] 启动：档位 ${cfg.lines.join(',')}，` +
+    `[LineMonitor] 启动：档位 ${cfg.lines.join(',')}（全部从开哨前就采），` +
       `窗口 开哨前${cfg.preKickoffMinutes}分~开哨后${cfg.postKickoffMinutes}分，` +
-      `tick ${tickMs / 1000}s，纯观测不下单`,
+      `tick ${tickMs / 1000}s，` +
+      `已钉档降频至${cfg.settledCadenceSeconds}s，纯观测不下单`,
   )
   await tick()
   if (once) {

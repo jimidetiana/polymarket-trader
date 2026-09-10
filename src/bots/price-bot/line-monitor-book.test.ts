@@ -5,8 +5,11 @@ import {
   judgeBook,
   passesMatchGate,
   cadenceSeconds,
+  cadenceSecondsFor,
+  isLineSettled,
   depthWeightedPrice,
   toMysqlUtc,
+  SETTLED_BID,
   DEFAULT_MONITOR_CONFIG,
 } from './line-monitor-book.js'
 
@@ -100,8 +103,55 @@ test('toMysqlUtc 输出无时区后缀的 UTC 串（本机 UTC+8 也不能偏）
   assert.equal(toMysqlUtc(new Date('2026-09-07T12:34:56.789Z')), '2026-09-07 12:34:56')
 })
 
-test('默认配置只采 0.5 档', () => {
-  assert.deepEqual(DEFAULT_MONITOR_CONFIG.lines, [0.5])
+test('默认采 0.5/1.5/2.5 三档，且都从开哨前开始（不等低档打出）', () => {
+  assert.deepEqual(DEFAULT_MONITOR_CONFIG.lines, [0.5, 1.5, 2.5])
+  // 3.5/4.5 没实测过场中活跃度，不进默认集
+  assert.ok(!DEFAULT_MONITOR_CONFIG.lines.includes(3.5))
+})
+
+// ---- isLineSettled / cadenceSecondsFor ----
+
+test('isLineSettled：Over 钉到阈值算已打出', () => {
+  assert.equal(isLineSettled('over', 0.999), true)
+  assert.equal(isLineSettled('over', SETTLED_BID), true)
+  assert.equal(isLineSettled('over', 0.98), false)
+})
+
+test('isLineSettled：Under 钉死一律不算已打出（第 89 分钟还能进球）', () => {
+  // 这是刻意的不对称。把 Under 0.999 也当已定局会漏掉整个「翻车」事件，
+  // 而那正是要测的东西。
+  assert.equal(isLineSettled('under', 0.999), false)
+  assert.equal(isLineSettled('under', 1), false)
+})
+
+test('isLineSettled：null/undefined 买价不算已打出（不能当无穷大）', () => {
+  assert.equal(isLineSettled('over', null), false)
+  assert.equal(isLineSettled('over', undefined), false)
+})
+
+test('cadenceSecondsFor：未打出的档节奏与原来完全一致', () => {
+  for (const mm of [null, -45, -11, -10, -1, 0, 75]) {
+    assert.equal(cadenceSecondsFor(mm, false), cadenceSeconds(mm), `mm=${mm}`)
+  }
+})
+
+test('cadenceSecondsFor：已打出的档降到 settledCadence', () => {
+  // 场中正常是 20s，已打出后降到 300s
+  assert.equal(cadenceSecondsFor(30, true, 300), 300)
+  assert.equal(cadenceSecondsFor(0, true, 300), 300)
+})
+
+test('cadenceSecondsFor：取 max，绝不因已打出而采得更快', () => {
+  // 赛前本来就是 300s，settledCadence 给 60 也不能提速到 60
+  assert.equal(cadenceSecondsFor(-45, true, 60), 300)
+})
+
+test('cadenceSecondsFor：settledCadence=0 表示不降频', () => {
+  assert.equal(cadenceSecondsFor(30, true, 0), 20)
+})
+
+test('默认已钉档降频到 300 秒', () => {
+  assert.equal(DEFAULT_MONITOR_CONFIG.settledCadenceSeconds, 300)
 })
 
 // ---- passesMatchGate ----

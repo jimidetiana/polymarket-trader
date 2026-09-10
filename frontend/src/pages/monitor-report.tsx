@@ -76,6 +76,9 @@ export default function MonitorReportPage() {
   const [ev, setEv] = useState<EvReport | null>(null)
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
+  // EV 面板看哪个档。默认 0.5：历史数据只有这一档，多档同采后
+  // 各档是**各自独立的问题**，混在一格里没有含义。
+  const [evLine, setEvLine] = useState(0.5)
 
   // 反转口径。默认对齐手写 SQL：早端含赛前、不限双边可成交
   const [rev, setRev] = useState<ReversalParams>({
@@ -229,11 +232,30 @@ export default function MonitorReportPage() {
 
         {ev && (
           <section className="overflow-hidden rounded-md border bg-card">
-            <div className="border-b px-3 py-2 text-sm font-medium">
-              买入方案与盈利可能
-              <span className="ml-2 text-xs font-normal text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-sm font-medium">
+              <span>买入方案与盈利可能</span>
+              <span className="text-xs font-normal text-muted-foreground">
                 按真实卖价买入 · 每场只取一个观测 · 结算由终局价 ≥{ev.settlement.threshold} 反推
               </span>
+              {ev.lines.length > 1 && (
+                <span className="ml-auto flex items-center gap-1">
+                  {ev.lines.map((l) => (
+                    <button
+                      key={l}
+                      type="button"
+                      onClick={() => setEvLine(l)}
+                      className={cn(
+                        'rounded border px-2 py-0.5 text-xs font-normal tabular-nums',
+                        evLine === l
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'text-muted-foreground hover:bg-muted/50',
+                      )}
+                    >
+                      {l} 档
+                    </button>
+                  ))}
+                </span>
+              )}
             </div>
 
             {!ev.anyAdequate && (
@@ -252,11 +274,12 @@ export default function MonitorReportPage() {
 
             <div className="grid gap-3 p-3 md:grid-cols-3">
               {ev.breakdowns
-                .filter((b) => b.cells.length > 0)
+                .filter((b) => b.line === evLine && b.cells.length > 0)
                 .map((b) => (
-                  <div key={`${b.side}-${b.minuteFrom}`} className="rounded-md border">
+                  <div key={`${b.line}-${b.side}-${b.minuteFrom}`} className="rounded-md border">
                     <div className="border-b bg-muted/30 px-2.5 py-1.5 text-xs font-medium">
-                      买 {b.side === 'over' ? 'Over' : 'Under'} · {b.minuteFrom}′~{b.minuteTo}′
+                      买 {b.side === 'over' ? 'Over' : 'Under'} {b.line} · {b.minuteFrom}′~
+                      {b.minuteTo}′
                       <span className="ml-1.5 font-normal text-muted-foreground">
                         基线 {b.baseRate == null ? '—' : formatPercent(b.baseRate)}
                       </span>
@@ -341,11 +364,21 @@ export default function MonitorReportPage() {
                   。所以这里一律 per-event 聚合，行数不能当样本量。
                 </div>
                 <div>
-                  <span className="text-foreground">Over 0.5 天然高胜率</span>：基线已是{' '}
-                  {ev.breakdowns.find((b) => b.side === 'over')?.baseRate == null
-                    ? '—'
-                    : formatPercent(ev.breakdowns.find((b) => b.side === 'over')!.baseRate!)}
+                  <span className="text-foreground">Over {evLine} 天然高胜率</span>：基线已是{' '}
+                  {(() => {
+                    const b = ev.breakdowns.find(
+                      (x) => x.side === 'over' && x.line === evLine,
+                    )
+                    return b?.baseRate == null ? '—' : formatPercent(b.baseRate)
+                  })()}
                   ，「买 Over 赢得多」本身不是发现。有意义的只有胜率减隐含概率的差，且要过显著性。
+                </div>
+                <div>
+                  <span className="text-foreground">加档不等于加样本</span>
+                  ：0.5 问「会不会进球」，1.5 问「会不会进第 2 个」——各档是
+                  <span className="text-foreground">各自独立的问题</span>
+                  ，都要单独攒够 30 场。加档增加的是问题数（广度），不是任一问题的样本量（深度）。
+                  要让 0.5 这一格更快够数，只能回填历史。
                 </div>
               </div>
             </div>

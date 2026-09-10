@@ -25,7 +25,8 @@ import { saveLineMonitorRows, type LineMonitorRow } from './db.js'
 import {
   topLevels,
   judgeBook,
-  cadenceSeconds,
+  cadenceSecondsFor,
+  isLineSettled,
   toMysqlUtc,
   passesMatchGate,
   DEFAULT_MONITOR_CONFIG,
@@ -193,12 +194,23 @@ async function fetchBooksBatch(tokenIds: string[]): Promise<Map<string, any>> {
 /** tokenId -> 上次采样的 epoch ms。重启后重采一次，无害。 */
 const lastSampled = new Map<string, number>()
 
-/** 只留「按自身节奏该采」的候选 */
-function filterDue(cands: Candidate[], now: Date): Candidate[] {
+/**
+ * 已经打出的档：`eventId:line`。只进不出——一档打出后不会退回未打出。
+ *
+ * 进程内存态，重启后清空、按第一轮的盘口重新学，无害（最多多采一轮）。
+ * 不落库也不查库：这里只用来降频，判错的代价是多采几行，不值得为它加一次查询。
+ */
+const settledLines = new Set<string>()
+
+const lineKey = (eventId: string, line: number): string => `${eventId}:${line}`
+
+/** 只留「按自身节奏该采」的候选。已打出的档按 settledCadenceSeconds 降频。 */
+function filterDue(cands: Candidate[], now: Date, cfg: MonitorConfig): Candidate[] {
   const t = now.getTime()
   return cands.filter((c) => {
     const mm = c.kickoffMs != null ? Math.round((t - c.kickoffMs) / 60000) : null
-    const need = cadenceSeconds(mm) * 1000
+    const settled = settledLines.has(lineKey(c.eventId, c.line))
+    const need = cadenceSecondsFor(mm, settled, cfg.settledCadenceSeconds) * 1000
     const prev = lastSampled.get(c.tokenId)
     return prev == null || t - prev >= need
   })
@@ -215,6 +227,10 @@ export interface RoundResult {
   invalidByReason: Record<string, number>
   /** 被赛事级闸门筛掉的**场次**数，按原因分组 */
   gatedOut: Record<string, number>
+  /** 本轮新判定为「已打出」的档数（下一轮起降频） */
+  newlySettled: number
+  /** 当前已打出、正在降频的档总数 */
+  settledActive: number
 }
 
 /**
@@ -228,7 +244,7 @@ export async function runMonitorRound(
   now = new Date(),
 ): Promise<RoundResult> {
   const { candidates: all, gatedOut } = await collectCandidates(cfg, now)
-  const cands = filterDue(all, now)
+  const cands = filterDue(all, now, cfg)
   const res: RoundResult = {
     inWindow: all.length,
     candidates: cands.length,
@@ -237,6 +253,8 @@ export async function runMonitorRound(
     valid: 0,
     invalidByReason: {},
     gatedOut,
+    newlySettled: 0,
+    settledActive: settledLines.size,
   }
   if (!cands.length) return res
 
@@ -262,6 +280,17 @@ export async function runMonitorRound(
     const j = book ? judgeBook(bids, asks, cfg) : { valid: false, reason: 'no_book' }
     if (j.valid) res.valid++
     else res.invalidByReason[j.reason!] = (res.invalidByReason[j.reason!] ?? 0) + 1
+
+    // 这一档的 Over 钉死了就记下，下一轮起降频。放在写库之前：
+    // 这一行本身照常落库，降频只影响后续轮次。
+    const bestBid = bids.length ? bids[0][0] : null
+    if (isLineSettled(c.side, bestBid)) {
+      const key = lineKey(c.eventId, c.line)
+      if (!settledLines.has(key)) {
+        settledLines.add(key)
+        res.newlySettled++
+      }
+    }
 
     // 保留负数表示赛前。不用 matchMinuteFrom：它把赛前钳成 0，
     // 而「这条样本是不是赛前采的」正是选择偏差的关键标记。
@@ -290,5 +319,12 @@ export async function runMonitorRound(
   }
 
   res.inserted = await saveLineMonitorRows(rows)
+  res.settledActive = settledLines.size
   return res
+}
+
+/** 仅供测试：清掉已打出档的内存态 */
+export function __resetSettledLines(): void {
+  settledLines.clear()
+  lastSampled.clear()
 }
