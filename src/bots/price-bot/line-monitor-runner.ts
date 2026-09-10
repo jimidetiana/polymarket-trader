@@ -139,6 +139,20 @@ async function main(): Promise<void> {
       `tick ${tickMs / 1000}s，` +
       `已钉档降频至${cfg.settledCadenceSeconds}s，纯观测不下单`,
   )
+  // 代理状态必须开机就打。没代理的症状是「窗口N 采样N 回书0」，
+  // 而那要等窗口里有比赛才暴露——可能白费一整晚采集。
+  // 只打是否设置与来源文件，不打值（.env 里还有私钥等）。
+  const proxySet = Boolean(
+    process.env.HTTPS_PROXY ||
+      process.env.HTTP_PROXY ||
+      process.env.https_proxy ||
+      process.env.http_proxy ||
+      process.env.ALL_PROXY,
+  )
+  console.log(
+    `[LineMonitor] .env = ${envPath ?? '未找到'}，` +
+      `代理 ${proxySet ? '已设置' : '⚠ 未设置（将直连，很可能回书 0）'}`,
+  )
   await tick()
   if (once) {
     console.log('[LineMonitor] MONITOR_ONCE=1，跑完一轮退出')
