@@ -69,6 +69,14 @@ export type MatchRow = {
 }
 
 export type ReversalParams = {
+  /**
+   * 算哪一档的反转。**必须筛档**：反转是「同一档」早端高位、晚端翻面，
+   * 跨档比对没有意义。不筛的实测后果（143 场库）：分母是 0.5 档早盘命中的
+   * 112 场，分子却接受任意档晚端 Under≥0.9——1-0 的比赛 Under 2.5 一直是
+   * 0.999，于是 16 场「反转」里 10 场其实进了球，反转率从 5.4% 虚高到 14.3%。
+   * 单档采集时这个 bug 不显形，1.5/2.5 进库后才暴露。
+   */
+  line: number
   /** 早端：over best_bid 高于此值 */
   earlyBid: number
   /** 早端分钟上界（不含） */
@@ -84,6 +92,7 @@ export type ReversalParams = {
 }
 
 export const DEFAULT_REVERSAL: ReversalParams = {
+  line: 0.5,
   earlyBid: 0.9,
   earlyBefore: 10,
   earlyFrom: null,
@@ -293,17 +302,18 @@ export async function fetchReversal(
   const validClause = params.validOnly ? ` AND ${VALID}` : ''
   const earlyFromClause = params.earlyFrom == null ? '' : ' AND match_minute >= ?'
 
-  // 早端子查询的参数顺序：bid, before, [from]
-  const earlyArgs: number[] = [params.earlyBid, params.earlyBefore]
+  // 两端都必须带 line，且是同一个 line：见 ReversalParams.line 的注释。
+  // 参数顺序：line, bid, before, [from]
+  const earlyArgs: number[] = [params.line, params.earlyBid, params.earlyBefore]
   if (params.earlyFrom != null) earlyArgs.push(params.earlyFrom)
 
   const earlySql = `
     SELECT DISTINCT event_id FROM price_bot_line_monitor
-    WHERE side='over' AND best_bid > ? AND match_minute < ?${earlyFromClause}${validClause}`
+    WHERE line = ? AND side='over' AND best_bid > ? AND match_minute < ?${earlyFromClause}${validClause}`
   const lateSql = `
     SELECT DISTINCT event_id FROM price_bot_line_monitor
-    WHERE side='under' AND best_bid > ? AND match_minute > ?${validClause}`
-  const lateArgs: number[] = [params.lateBid, params.lateAfter]
+    WHERE line = ? AND side='under' AND best_bid > ? AND match_minute > ?${validClause}`
+  const lateArgs: number[] = [params.line, params.lateBid, params.lateAfter]
 
   const [counts] = await pool.query<any[]>(
     `SELECT (SELECT COUNT(*) FROM (${earlySql}) a) early_events,
@@ -333,7 +343,8 @@ export async function fetchReversal(
             MAX(CASE WHEN m.side='under' AND m.match_minute > ? THEN m.best_bid END) late_max_bid
        FROM price_bot_line_monitor m
        LEFT JOIN soccer_events e ON e.id = m.event_id
-      WHERE m.event_id IN (${lateSql}) AND m.event_id IN (${earlySql})
+      WHERE m.line = ?
+        AND m.event_id IN (${lateSql}) AND m.event_id IN (${earlySql})
       GROUP BY m.event_id, e.title_zh, e.title_en, e.liquidity, e.volume
       ORDER BY late_rows DESC`,
     [
@@ -345,6 +356,7 @@ export async function fetchReversal(
       params.lateBid, params.lateAfter,
       params.lateBid, params.lateAfter,
       params.lateAfter,
+      params.line,
       ...lateArgs, ...earlyArgs,
     ],
   )
@@ -421,6 +433,7 @@ export function parseReversalParams(q: Record<string, unknown>): ReversalParams 
   }
   const earlyFromRaw = q.earlyFrom
   return {
+    line: numParam(q.line, DEFAULT_REVERSAL.line),
     earlyBid: numParam(q.earlyBid, DEFAULT_REVERSAL.earlyBid),
     earlyBefore: numParam(q.earlyBefore, DEFAULT_REVERSAL.earlyBefore),
     earlyFrom:

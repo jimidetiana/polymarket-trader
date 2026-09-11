@@ -1594,6 +1594,8 @@ export interface MonitorMatchRow {
 }
 
 export interface ReversalParams {
+  /** 算哪一档。反转必须同档比对，跨档会把 1-0 的 Under 2.5 当成反转 */
+  line: number
   earlyBid: number
   earlyBefore: number
   earlyFrom: number | null
@@ -1694,6 +1696,7 @@ export async function fetchMonitorReport(
   params: Partial<ReversalParams> & { gateThreshold?: number } = {},
 ): Promise<MonitorReport> {
   const qs = new URLSearchParams()
+  if (params.line !== undefined) qs.set('line', String(params.line))
   if (params.earlyBid !== undefined) qs.set('earlyBid', String(params.earlyBid))
   if (params.earlyBefore !== undefined) qs.set('earlyBefore', String(params.earlyBefore))
   // null 表示「不设下界」，要显式跳过而不是写成空串

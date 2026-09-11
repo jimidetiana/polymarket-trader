@@ -82,6 +82,9 @@ export default function MonitorReportPage() {
 
   // 反转口径。默认对齐手写 SQL：早端含赛前、不限双边可成交
   const [rev, setRev] = useState<ReversalParams>({
+    // 必须锁一档。不筛档时分子会收进「1-0 的比赛 Under 2.5 还在 0.999」，
+    // 实测把 0.5 档真实的 5.4% 抬成 14.3%。
+    line: 0.5,
     earlyBid: 0.9,
     earlyBefore: 10,
     earlyFrom: null,
@@ -521,11 +524,25 @@ export default function MonitorReportPage() {
             <div className="border-b px-3 py-2 text-sm font-medium">
               反转分析
               <span className="ml-2 text-xs font-normal text-muted-foreground">
-                早端 Over 高价 → 晚端 Under 高价
+                {rev.line} 档 · 早端 Over 高价 → 晚端 Under 高价（同档比对）
               </span>
             </div>
 
             <div className="flex flex-wrap items-end gap-3 border-b bg-muted/20 p-3">
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-muted-foreground">档位</span>
+                <select
+                  value={String(rev.line)}
+                  onChange={(e) => setRev({ ...rev, line: Number(e.target.value) })}
+                  className="w-20 rounded-md border bg-background px-2 py-1 text-xs tabular-nums"
+                >
+                  {(ev?.lines?.length ? ev.lines : [0.5]).map((l) => (
+                    <option key={l} value={String(l)}>
+                      {l}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-muted-foreground">早端 Over 买价 &gt;</span>
                 <input
