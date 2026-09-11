@@ -85,20 +85,43 @@ export type EvBreakdown = {
 }
 
 export type SelectionBiasRow = {
+  /** 哪一档。可成交率各档差很多（实测 0.5 档 43.7% vs 1.5 档 69.3%），不能混算 */
+  line: number
   outcome: string
   rows: number
   validRows: number
   validRate: number
-  events: number
+  /** 观测数 = DISTINCT (event_id, line) */
+  observations: number
+}
+
+/** 每档一行的结算统计。**不提供跨档合计**：见 SettlementRow 的注释。 */
+export type SettlementRow = {
+  line: number
+  overWon: number
+  underWon: number
+  undecided: number
+  /** Over 胜率（已定局为分母）。0.5 档 92.4%、1.5 档 75.0%、2.5 档 44.0% */
+  overRate: number | null
 }
 
 export type EvReport = {
-  /** 结算口径统计：定出多少场、多少场未定局 */
-  settlement: { overWon: number; underWon: number; undecided: number; threshold: number }
+  /**
+   * 结算口径统计，**每档一行**。
+   * 为什么没有合计行：跨档相加得到的「Over 胜率 83.2%」既不是任何一档的胜率，
+   * 也不随足球规律变——它只反映各档的采样比例，多采几晚 2.5 就会自己往下走。
+   */
+  settlement: { rows: SettlementRow[]; threshold: number }
   /** 选择偏差证据表 */
   selectionBias: SelectionBiasRow[]
-  /** 自相关证据：行级 n vs 场级 n */
-  autocorrelation: Array<{ band: string; rows: number; events: number; rowsPerEvent: number }>
+  /** 自相关证据：行级 n vs 观测级 n（按档） */
+  autocorrelation: Array<{
+    line: number
+    band: string
+    rows: number
+    observations: number
+    rowsPerObservation: number
+  }>
   /** 本次报告实际算了哪些档（库里有数据的那些） */
   lines: number[]
   breakdowns: EvBreakdown[]
@@ -148,37 +171,61 @@ const OUTCOME_CTE = `
     GROUP BY m.event_id, m.line
   )`
 
+/**
+ * 结算统计，**按档分开**。
+ * 不分档相加会得到「Over 胜率 83.2%」这种不存在的数字：实测 0.5 档 92.4%、
+ * 1.5 档 75.0%、2.5 档 44.0%，合计值只是这三个的采样加权平均，
+ * 会随「今晚多采了哪档」自己漂移，不能当结论用。
+ */
 export async function fetchSettlement(pool: Pool): Promise<EvReport['settlement']> {
   const [rows] = await pool.query<any[]>(`${OUTCOME_CTE}
-    SELECT SUM(over_won = 1) over_won, SUM(over_won = 0) under_won,
+    SELECT line, SUM(over_won = 1) over_won, SUM(over_won = 0) under_won,
            SUM(over_won IS NULL) undecided
-    FROM outcome`)
-  const r = rows[0] ?? {}
+    FROM outcome GROUP BY line ORDER BY line`)
   return {
-    overWon: num(r.over_won),
-    underWon: num(r.under_won),
-    undecided: num(r.undecided),
+    rows: rows.map((r) => {
+      const ow = num(r.over_won)
+      const uw = num(r.under_won)
+      const decided = ow + uw
+      return {
+        line: num(r.line),
+        overWon: ow,
+        underWon: uw,
+        undecided: num(r.undecided),
+        overRate: decided > 0 ? ow / decided : null,
+      }
+    }),
     threshold: SETTLE_THRESHOLD,
   }
 }
 
-/** 选择偏差证据：可成交率是否随最终结果变化 */
+/**
+ * 选择偏差证据：可成交率是否随最终结果变化。**按档分开**。
+ * 各档的可成交率本身差很多（实测 0.5 档 Over 赢 43.7% / 1.5 档 69.3%），
+ * 混算的话档间差异会盖住「同一档内、赢和输的可成交率不同」这个真正要看的信号。
+ * 注意 Under 赢那一侧的观测数很小（0.5 档只有 8 个），不要在小样本上下结论。
+ */
 export async function fetchSelectionBias(pool: Pool): Promise<SelectionBiasRow[]> {
   const [rows] = await pool.query<any[]>(`${OUTCOME_CTE}
-    SELECT o.over_won, COUNT(*) rows_all, SUM(s.book_valid) valid_rows,
-           COUNT(DISTINCT s.event_id) events
+    SELECT s.line, o.over_won, COUNT(*) rows_all, SUM(s.book_valid) valid_rows,
+           COUNT(DISTINCT s.event_id, s.line) observations
     FROM price_bot_line_monitor s
     JOIN outcome o ON o.event_id = s.event_id AND o.line = s.line
     WHERE o.over_won IS NOT NULL AND s.match_minute BETWEEN 0 AND 90
-    GROUP BY o.over_won ORDER BY o.over_won DESC`)
+    GROUP BY s.line, o.over_won ORDER BY s.line, o.over_won DESC`)
   return rows.map((r) => {
     const total = num(r.rows_all)
+    const line = num(r.line)
+    // 「0-0」只对 0.5 档成立。1.5 档的 Under 赢是「最多 1 球」，2.5 档是「最多 2 球」。
+    // 用 floor(line) 表达上限，避免把三档都写成 0-0。
+    const underLabel = line < 1 ? '0-0' : `最多 ${Math.floor(line)} 球`
     return {
-      outcome: num(r.over_won) === 1 ? 'Over 赢（有进球）' : 'Under 赢（0-0）',
+      line,
+      outcome: num(r.over_won) === 1 ? 'Over 赢（有进球）' : `Under 赢（${underLabel}）`,
       rows: total,
       validRows: num(r.valid_rows),
       validRate: total > 0 ? num(r.valid_rows) / total : 0,
-      events: num(r.events),
+      observations: num(r.observations),
     }
   })
 }
@@ -188,21 +235,25 @@ export async function fetchAutocorrelation(
   pool: Pool,
 ): Promise<EvReport['autocorrelation']> {
   const [rows] = await pool.query<any[]>(`${OUTCOME_CTE}
-    SELECT CASE WHEN s.best_ask < 0.60 THEN '<0.60'
+    SELECT s.line, CASE WHEN s.best_ask < 0.60 THEN '<0.60'
                 WHEN s.best_ask < 0.80 THEN '0.60-0.80'
                 WHEN s.best_ask < 0.95 THEN '0.80-0.95'
                 ELSE '>=0.95' END band,
-           COUNT(*) rows_all, COUNT(DISTINCT s.event_id) events
+           COUNT(*) rows_all,
+           -- DISTINCT event_id 会把多档场次的行数摊到 1 个「场」上，
+           -- 实测虚高 47%（385 行/场 vs 261 行/观测），把自相关说得比实际严重。
+           COUNT(DISTINCT s.event_id, s.line) observations
     FROM price_bot_line_monitor s
     JOIN outcome o ON o.event_id = s.event_id AND o.line = s.line
     WHERE s.book_valid = 1 AND s.side = 'over' AND o.over_won IS NOT NULL
       AND s.match_minute BETWEEN 0 AND 90
-    GROUP BY band ORDER BY band`)
+    GROUP BY s.line, band ORDER BY s.line, band`)
   return rows.map((r) => ({
+    line: num(r.line),
     band: String(r.band),
     rows: num(r.rows_all),
-    events: num(r.events),
-    rowsPerEvent: num(r.events) > 0 ? num(r.rows_all) / num(r.events) : 0,
+    observations: num(r.observations),
+    rowsPerObservation: num(r.observations) > 0 ? num(r.rows_all) / num(r.observations) : 0,
   }))
 }
 

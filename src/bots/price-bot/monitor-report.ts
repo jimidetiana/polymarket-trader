@@ -18,6 +18,19 @@ import type { Pool } from 'mysql2/promise'
  * 3. **单边盘不是 bug。** over 与 under 是互补 token，p_under = 1 - p_over 逐档成立，
  *    所以 over(5档买/0档卖) 必然镜像成 under(0档买/5档卖)。0.5 大小球一旦进球就成定局，
  *    赢家钉在 0.999 且卖档全空 —— 这是真实盘面，正是采集器要记的分母。
+ *
+ * 4. **观测单位是 `(event_id, line)`，不是 `event_id`。**
+ *    同一场比赛的 0.5 和 1.5 是两个不同的问题（「会不会进球」vs「会不会进第 2 个」），
+ *    绝不能当成一个事件。凡是聚合、计数、筛选、配对，都必须带 line：
+ *      - COUNT(DISTINCT event_id)      → COUNT(DISTINCT event_id, line)
+ *      - GROUP BY event_id             → GROUP BY event_id, line
+ *      - PARTITION BY event_id         → PARTITION BY event_id, line
+ *      - 子查询 WHERE / JOIN 的两端    → 必须是**同一个** line
+ *    单档采集时这些全都不显形，所以 0.5/1.5/2.5 三档进库后一次性暴露了 8 处。
+ *    实测偏差（143 场 / 207 观测）：观测数少报 31%；Over 胜率把 0.5 的 92.4%、
+ *    1.5 的 75.0%、2.5 的 44.0% 抹成 83.2%（这个数不随足球规律变，只反映各档采样比例）；
+ *    行/观测虚高 47%；反转率虚高成 14.3%（真值 5.4%）。
+ *    唯一的例外是 event 层属性（如 soccer_events.liquidity 的闸门检查），那本来就与档无关。
  */
 
 /** 有效（可成交）行的判定列。采集时已算好，这里只复用，避免两套口径。 */
@@ -25,7 +38,10 @@ const VALID = 'book_valid = 1'
 
 export type MonitorOverview = {
   rows: number
+  /** 场次数。只用于「采了多少场比赛」，**不是样本量** */
   events: number
+  /** 观测数 = DISTINCT (event_id, line)。这才是样本量 */
+  observations: number
   tokens: number
   snapshots: number
   firstSnapshot: string | null
@@ -43,12 +59,16 @@ export type PhaseBucket = {
   valid: number
   validPct: number
   events: number
+  /** 观测数 = DISTINCT (event_id, line) */
+  observations: number
 }
 
 export type ReasonBucket = { reason: string; rows: number; pct: number }
 
 export type BandBucket = {
   band: string
+  /** 哪一档。价格带必须按档分开：「便宜的 0.5」和「便宜的 2.5」是不同的东西 */
+  line: number
   rows: number
   minMinute: number | null
   maxMinute: number | null
@@ -56,8 +76,11 @@ export type BandBucket = {
 
 export type PairShape = { shape: string; pairs: number }
 
+/** 一行 = 一个观测 (event, line)，不是一场比赛。多档场次会占多行。 */
 export type MatchRow = {
   eventId: string
+  /** 哪一档 */
+  line: number
   title: string | null
   liquidity: number | null
   volume: number | null
@@ -164,6 +187,8 @@ export async function fetchMonitorOverview(pool: Pool): Promise<MonitorOverview>
   const [rows] = await pool.query<any[]>(`
     SELECT COUNT(*) rows_all,
            COUNT(DISTINCT event_id) events,
+           -- 样本量是观测数，不是场次数。实测 143 场 = 207 个观测，差 31%。
+           COUNT(DISTINCT event_id, line) observations,
            COUNT(DISTINCT token_id) tokens,
            COUNT(DISTINCT snapshot_at) snaps,
            MIN(snapshot_at) first_snap,
@@ -178,6 +203,7 @@ export async function fetchMonitorOverview(pool: Pool): Promise<MonitorOverview>
   return {
     rows: total,
     events: num(r.events),
+    observations: num(r.observations),
     tokens: num(r.tokens),
     snapshots: num(r.snaps),
     firstSnapshot: strOrNull(r.first_snap),
@@ -195,6 +221,7 @@ export async function fetchPhaseBuckets(pool: Pool): Promise<PhaseBucket[]> {
            COUNT(*) rows_all,
            SUM(${VALID}) valid,
            COUNT(DISTINCT event_id) events,
+           COUNT(DISTINCT event_id, line) observations,
            MIN(COALESCE(match_minute, 99999)) ord
     FROM price_bot_line_monitor
     GROUP BY phase ORDER BY ord`)
@@ -207,6 +234,7 @@ export async function fetchPhaseBuckets(pool: Pool): Promise<PhaseBucket[]> {
       valid,
       validPct: total > 0 ? valid / total : 0,
       events: num(r.events),
+      observations: num(r.observations),
     }
   })
 }
@@ -223,15 +251,21 @@ export async function fetchReasonBuckets(pool: Pool): Promise<ReasonBucket[]> {
   }))
 }
 
+/**
+ * 价格带分布，**按档分开**。
+ * 不分档的话「<0.30 这一格 39,340 行」里混着 21,117 行 0.5 和 8,259 行 2.5，
+ * 而「便宜的 0.5」（要 0-0）和「便宜的 2.5」（要 ≤2 球）是完全不同的赌注。
+ */
 export async function fetchBandBuckets(pool: Pool): Promise<BandBucket[]> {
   const [rows] = await pool.query<any[]>(`
-    SELECT ${BAND_SQL} band, COUNT(*) rows_all,
+    SELECT line, ${BAND_SQL} band, COUNT(*) rows_all,
            MIN(match_minute) mn, MAX(match_minute) mx
     FROM price_bot_line_monitor
     WHERE ${VALID} AND best_ask IS NOT NULL
-    GROUP BY band ORDER BY rows_all DESC`)
+    GROUP BY line, band ORDER BY line, rows_all DESC`)
   return rows.map((r) => ({
     band: String(r.band),
+    line: num(r.line),
     rows: num(r.rows_all),
     minMinute: numOrNull(r.mn),
     maxMinute: numOrNull(r.mx),
@@ -260,18 +294,24 @@ export async function fetchPairShapes(pool: Pool, limit = 12): Promise<PairShape
   return rows.map((r) => ({ shape: String(r.shape), pairs: num(r.pairs) }))
 }
 
+/**
+ * 明细表，**一行一个观测 (event, line)**，多档场次占多行。
+ * 按 event_id 合并会把一场比赛三个档的行数、可成交数、分钟范围全糊在一起，
+ * 实测有 32 场是这种情况（各 3 档、单场最多 8,262 行）。
+ */
 export async function fetchMatchRows(pool: Pool, limit = 60): Promise<MatchRow[]> {
   const [rows] = await pool.query<any[]>(`
-    SELECT m.event_id, e.title_zh, e.title_en, e.liquidity, e.volume,
+    SELECT m.event_id, m.line, e.title_zh, e.title_en, e.liquidity, e.volume,
            COUNT(*) rows_all, SUM(m.${VALID}) valid,
            MIN(m.match_minute) mn, MAX(m.match_minute) mx,
            GROUP_CONCAT(DISTINCT m.invalid_reason) reasons
     FROM price_bot_line_monitor m
     LEFT JOIN soccer_events e ON e.id = m.event_id
-    GROUP BY m.event_id, e.title_zh, e.title_en, e.liquidity, e.volume
+    GROUP BY m.event_id, m.line, e.title_zh, e.title_en, e.liquidity, e.volume
     ORDER BY rows_all DESC LIMIT ?`, [limit])
   return rows.map((r) => ({
     eventId: String(r.event_id),
+    line: num(r.line),
     title: strOrNull(r.title_zh) ?? strOrNull(r.title_en),
     liquidity: numOrNull(r.liquidity),
     volume: numOrNull(r.volume),
@@ -345,7 +385,9 @@ export async function fetchReversal(
        LEFT JOIN soccer_events e ON e.id = m.event_id
       WHERE m.line = ?
         AND m.event_id IN (${lateSql}) AND m.event_id IN (${earlySql})
-      GROUP BY m.event_id, e.title_zh, e.title_en, e.liquidity, e.volume
+      -- GROUP BY 带上 m.line：此处虽已被 WHERE 锁成单档，但一旦有人放宽那个
+      -- WHERE，缺 line 的 GROUP BY 会把多档静默合并成一行。
+      GROUP BY m.event_id, m.line, e.title_zh, e.title_en, e.liquidity, e.volume
       ORDER BY late_rows DESC`,
     [
       params.earlyBid, params.earlyBefore,
@@ -384,6 +426,11 @@ export async function fetchReversal(
   }
 }
 
+/**
+ * 闸门检查。**这里按 event 计数是对的**，是全文件唯一的例外：
+ * liquidity 是 soccer_events 的 event 层属性，与档位无关，
+ * 按 (event,line) 数会把同一场的同一个流动性值重复计 3 次。
+ */
 export async function fetchGateCheck(
   pool: Pool,
   threshold: number,

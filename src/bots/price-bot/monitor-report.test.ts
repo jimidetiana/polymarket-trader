@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { DEFAULT_REVERSAL, parseReversalParams } from './monitor-report.js'
 import { DEFAULT_MONITOR_CONFIG } from './line-monitor-book.js'
@@ -28,6 +31,42 @@ test('parseReversalParams：line 缺失或非法退回默认档，不静默变 0
   // line=0 不是合法档位，但 0 是有限数，会被原样接受；
   // 这里固定住行为：只要不是「静默变 0」就行，非法值走上面三条。
   assert.equal(parseReversalParams({ line: '0.5' }).line, 0.5)
+})
+
+/**
+ * 观测单位 = (event_id, line)。这条用源码扫描来守：
+ * 光靠类型检查发现不了 SQL 字符串里少写一个 line。
+ */
+test('monitor-report.ts / monitor-ev.ts 里不残留按 event 单独聚合的 SQL', async () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  for (const f of ['monitor-report.ts', 'monitor-ev.ts']) {
+    const src = await readFile(join(here, f), 'utf8')
+    // 去掉注释再扫，否则注释里举的反例会误报
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/--[^\n]*/g, '')
+
+    // 允许 COUNT(DISTINCT event_id)（「采了多少场比赛」是合法信息），
+    // 但同一条 SELECT 里必须同时给出观测数，否则「场次」会被当成样本量。
+    // 按 SELECT 切开逐段检查，而不是全文件一刀切。
+    for (const stmt of code.split(/\bSELECT\b/i)) {
+      if (!/COUNT\(DISTINCT\s+\w*\.?event_id\s*\)/i.test(stmt)) continue
+      assert.ok(
+        /COUNT\(DISTINCT\s+\w*\.?event_id\s*,\s*\w*\.?line\s*\)/i.test(stmt),
+        `${f}: 有 COUNT(DISTINCT event_id) 但同段没有 COUNT(DISTINCT event_id, line)，` +
+          `场次数会被误当样本量`,
+      )
+    }
+
+    // GROUP BY / PARTITION BY 只要出现 event_id，同一子句里就必须出现 line
+    for (const m of code.matchAll(/(GROUP BY|PARTITION BY)([^)\n]*event_id[^)\n]*)/gi)) {
+      assert.ok(
+        /\bline\b/i.test(m[2]),
+        `${f}: 「${m[1]}${m[2].trim()}」少了 line`,
+      )
+    }
+  }
 })
 
 test('反转默认口径其余字段不变（改档不该顺手动阈值）', () => {

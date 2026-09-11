@@ -1551,7 +1551,10 @@ export async function fetchPriceBotLogs(params?: {
 
 export interface MonitorOverview {
   rows: number
+  /** 场次数。**不是样本量** */
   events: number
+  /** 观测数 = DISTINCT (event_id, line)。这才是样本量 */
+  observations: number
   tokens: number
   snapshots: number
   firstSnapshot: string | null
@@ -1568,12 +1571,15 @@ export interface MonitorPhaseBucket {
   valid: number
   validPct: number
   events: number
+  observations: number
 }
 
 export interface MonitorReasonBucket { reason: string; rows: number; pct: number }
 
 export interface MonitorBandBucket {
   band: string
+  /** 哪一档。「便宜的 0.5」和「便宜的 2.5」是不同的赌注，不能同格 */
+  line: number
   rows: number
   minMinute: number | null
   maxMinute: number | null
@@ -1581,8 +1587,10 @@ export interface MonitorBandBucket {
 
 export interface MonitorPairShape { shape: string; pairs: number }
 
+/** 一行 = 一个观测 (event, line)，多档场次占多行 */
 export interface MonitorMatchRow {
   eventId: string
+  line: number
   title: string | null
   liquidity: number | null
   volume: number | null
@@ -1671,16 +1679,33 @@ export interface EvBreakdown {
   baseEvents: number
 }
 
+/** 每档一行的结算统计。没有跨档合计：合计的 Over 胜率只反映采样比例，不是规律 */
+export interface SettlementRow {
+  line: number
+  overWon: number
+  underWon: number
+  undecided: number
+  overRate: number | null
+}
+
 export interface EvReport {
-  settlement: { overWon: number; underWon: number; undecided: number; threshold: number }
+  settlement: { rows: SettlementRow[]; threshold: number }
   selectionBias: Array<{
+    /** 哪一档。各档可成交率差很多（实测 0.5 档 43.7% vs 1.5 档 69.3%），不能混算 */
+    line: number
     outcome: string
     rows: number
     validRows: number
     validRate: number
-    events: number
+    observations: number
   }>
-  autocorrelation: Array<{ band: string; rows: number; events: number; rowsPerEvent: number }>
+  autocorrelation: Array<{
+    line: number
+    band: string
+    rows: number
+    observations: number
+    rowsPerObservation: number
+  }>
   /** 本次报告实际算了哪些档（库里有数据的那些） */
   lines: number[]
   breakdowns: EvBreakdown[]

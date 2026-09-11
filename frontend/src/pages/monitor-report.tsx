@@ -184,7 +184,13 @@ export default function MonitorReportPage() {
           <>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
               <StatCard label="总行数" value={formatNumber(ov.rows)} hint={`${ov.snapshots} 轮采样`} />
-              <StatCard label="赛事数" value={String(ov.events)} hint={`${ov.tokens} 个 token`} />
+              {/* 主数字是观测数（样本量），场次数降为副标。
+                  实测 143 场 = 207 个观测，把场次当样本量会少报 31%。 */}
+              <StatCard
+                label="观测数"
+                value={String(ov.observations)}
+                hint={`${ov.events} 场 · ${ov.tokens} 个 token`}
+              />
               <StatCard
                 label="可成交行"
                 value={formatNumber(ov.validRows)}
@@ -267,10 +273,17 @@ export default function MonitorReportPage() {
                   当前没有任何价格带样本足够，下面的 EV 都不能当结论用
                 </div>
                 <div className="text-muted-foreground">
-                  已定局 {ev.settlement.overWon + ev.settlement.underWon} 场（Over{' '}
-                  {ev.settlement.overWon} / Under {ev.settlement.underWon}），未定局{' '}
-                  {ev.settlement.undecided} 场已排除。每格至少要 30 场才出数字，
-                  而 EV 区间全部跨零 —— 连方向都定不下来，不是「小赚」而是「未知」。
+                  {/* 按档列，不给合计：合计的 Over 胜率只反映各档采样比例，不是规律 */}
+                  {ev.settlement.rows
+                    .map(
+                      (s) =>
+                        `${s.line} 档已定局 ${s.overWon + s.underWon}（Over ${s.overWon}/Under ${s.underWon}` +
+                        `${s.overRate == null ? '' : `，Over ${formatPercent(s.overRate)}`}）` +
+                        `，未定局 ${s.undecided}`,
+                    )
+                    .join('；')}
+                  。每格至少要 30 个观测才出数字，而 EV 区间全部跨零 —— 连方向都定不下来，
+                  不是「小赚」而是「未知」。
                 </div>
               </div>
             )}
@@ -355,16 +368,29 @@ export default function MonitorReportPage() {
                 <div>
                   <span className="text-foreground">选择偏差（结构性，修不掉）</span>：进球后赢家钉
                   0.999、卖档空 → 该行判无效。于是「可成交」样本偏向<span className="text-foreground">还没进球</span>的场次。实测&nbsp;
-                  {ev.selectionBias.map((s) => `${s.outcome} 可成交率 ${formatPercent(s.validRate)}`).join('，')}
-                  ，差 {ev.selectionBias.length === 2
-                    ? formatPercent(Math.abs(ev.selectionBias[0].validRate - ev.selectionBias[1].validRate))
-                    : '—'}
+                  {/* 按档比，不跨档：各档可成交率本身差很多（实测 0.5 档 43.7% vs 1.5 档 69.3%），
+                      跨档相减得到的「差」是档间差异，不是选择偏差 */}
+                  {ev.selectionBias
+                    .filter((s) => s.line === evLine)
+                    .map(
+                      (s) =>
+                        `${s.outcome} 可成交率 ${formatPercent(s.validRate)}（${s.observations} 观测）`,
+                    )
+                    .join('，')}
+                  {(() => {
+                    const same = ev.selectionBias.filter((s) => s.line === evLine)
+                    if (same.length !== 2) return null
+                    return `，同档相差 ${formatPercent(Math.abs(same[0].validRate - same[1].validRate))}`
+                  })()}
                   。只看可成交样本等于偏向 0-0，会高估 Under、低估 Over。
                 </div>
                 <div>
-                  <span className="text-foreground">自相关</span>：每 20 秒一行，同一场重复计入。
-                  {ev.autocorrelation.map((a) => `${a.band} ${a.rows}行/${a.events}场`).join('，')}
-                  。所以这里一律 per-event 聚合，行数不能当样本量。
+                  <span className="text-foreground">自相关</span>：每 20 秒一行，同一个观测重复计入。
+                  {ev.autocorrelation
+                    .filter((a) => a.line === evLine)
+                    .map((a) => `${a.band} ${a.rows}行/${a.observations}观测`)
+                    .join('，')}
+                  。所以这里一律按 (场次,档位) 聚合，行数不能当样本量。
                 </div>
                 <div>
                   <span className="text-foreground">Over {evLine} 天然高胜率</span>：基线已是{' '}
@@ -465,12 +491,13 @@ export default function MonitorReportPage() {
               <div className="border-b px-3 py-2 text-sm font-medium">
                 可成交行的价格带
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
-                  这才是真能下单的样本
+                  按档分开 · 「便宜的 0.5」和「便宜的 2.5」是不同的赌注
                 </span>
               </div>
               <table className="w-full text-left text-xs">
                 <thead className="bg-muted/50 text-muted-foreground">
                   <tr>
+                    <th className="px-3 py-2 font-medium">档位</th>
                     <th className="px-3 py-2 font-medium">卖价带</th>
                     <th className="px-3 py-2 text-right font-medium">行数</th>
                     <th className="px-3 py-2 font-medium">出现分钟</th>
@@ -478,7 +505,8 @@ export default function MonitorReportPage() {
                 </thead>
                 <tbody className="divide-y">
                   {report.bands.map((b) => (
-                    <tr key={b.band} className="hover:bg-muted/30">
+                    <tr key={`${b.line}-${b.band}`} className="hover:bg-muted/30">
+                      <td className="px-3 py-2 font-mono tabular-nums">{b.line}</td>
                       <td className="px-3 py-2 font-mono">{b.band}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{formatNumber(b.rows)}</td>
                       <td className="px-3 py-2 tabular-nums text-muted-foreground">
@@ -707,9 +735,9 @@ export default function MonitorReportPage() {
         {report && (
           <section className="overflow-hidden rounded-md border bg-card">
             <div className="border-b px-3 py-2 text-sm font-medium">
-              逐场明细
+              逐观测明细
               <span className="ml-2 text-xs font-normal text-muted-foreground">
-                按采样行数排序，共 {report.matches.length} 场
+                一行 = 一个 (场次, 档位)，多档比赛占多行 · 共 {report.matches.length} 个观测
               </span>
             </div>
             <div className="max-h-[28rem] overflow-auto">
@@ -717,6 +745,7 @@ export default function MonitorReportPage() {
                 <thead className="sticky top-0 bg-muted/50 text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 font-medium">赛事</th>
+                    <th className="px-3 py-2 font-medium">档位</th>
                     <th className="px-3 py-2 text-right font-medium">行数</th>
                     <th className="px-3 py-2 text-right font-medium">可成交</th>
                     <th className="px-3 py-2 text-right font-medium">占比</th>
@@ -729,13 +758,14 @@ export default function MonitorReportPage() {
                   {report.matches.map((m) => {
                     const pct = m.rows > 0 ? m.valid / m.rows : 0
                     return (
-                      <tr key={m.eventId} className="hover:bg-muted/30">
+                      <tr key={`${m.eventId}-${m.line}`} className="hover:bg-muted/30">
                         <td className="px-3 py-2">
                           <div className="font-medium">{m.title ?? m.eventId}</div>
                           <div className="font-mono text-[10px] text-muted-foreground">
                             {m.eventId}
                           </div>
                         </td>
+                        <td className="px-3 py-2 font-mono tabular-nums">{m.line}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(m.rows)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(m.valid)}</td>
                         <td
